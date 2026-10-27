@@ -28,6 +28,6 @@ coverage/
 .env.*.local
 
 # Local storage and temporary files
-storage/
+/storage/
 tmp/
 *.log

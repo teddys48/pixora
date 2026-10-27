@@ -13,10 +13,34 @@ import (
 
 	"pixora/backend/internal/api"
 	"pixora/backend/internal/config"
+	"pixora/backend/internal/database"
+	"pixora/backend/internal/repository"
+	"pixora/backend/internal/storage"
 )
 
-// New creates and configures the Fiber application
+// Dependencies bundles all server runtime dependencies.
+type Dependencies struct {
+	Config    *config.Config
+	DB        *database.DB
+	Storage   *storage.Storage
+	PhotoRepo repository.PhotoRepository
+	AlbumRepo repository.AlbumRepository
+}
+
+// New creates and configures the Fiber application using Config only (backward compatibility).
 func New(cfg *config.Config) *fiber.App {
+	return NewWithDependencies(Dependencies{
+		Config: cfg,
+	})
+}
+
+// NewWithDependencies creates and configures the Fiber application with all runtime dependencies.
+func NewWithDependencies(deps Dependencies) *fiber.App {
+	cfg := deps.Config
+	if cfg == nil {
+		cfg = config.Load()
+	}
+
 	app := fiber.New(fiber.Config{
 		AppName:      "Pixora Photo Gallery",
 		ServerHeader: "Pixora",
@@ -52,7 +76,26 @@ func New(cfg *config.Config) *fiber.App {
 
 	// API Routes
 	apiGroup := app.Group("/api")
-	apiGroup.Get("/health", api.HealthHandler)
+
+	// Health check with database and storage inspection
+	if deps.DB != nil || deps.Storage != nil {
+		apiGroup.Get("/health", api.NewHealthHandler(deps.DB, deps.Storage))
+	} else {
+		apiGroup.Get("/health", api.HealthHandler)
+	}
+
+	// Album routes
+	if deps.AlbumRepo != nil {
+		apiGroup.Get("/albums", api.ListAlbumsHandler(deps.AlbumRepo))
+		apiGroup.Post("/albums", api.CreateAlbumHandler(deps.AlbumRepo))
+		apiGroup.Get("/albums/:id", api.GetAlbumHandler(deps.AlbumRepo))
+	}
+
+	// Photo routes
+	if deps.PhotoRepo != nil {
+		apiGroup.Get("/photos", api.ListPhotosHandler(deps.PhotoRepo))
+		apiGroup.Get("/photos/:id", api.GetPhotoHandler(deps.PhotoRepo))
+	}
 
 	// Explicit 404 handler for unknown /api/* endpoints
 	apiGroup.All("/*", func(c *fiber.Ctx) error {

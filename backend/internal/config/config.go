@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-// Config holds the application configuration
+// Config holds the centralized application configuration.
 type Config struct {
 	Port         string
 	Host         string
@@ -17,7 +18,7 @@ type Config struct {
 	DatabasePath string // Path to SQLite database file (default: /data/pixora.db in container)
 }
 
-// Load reads configuration from environment variables with sensible defaults
+// Load reads configuration from environment variables with sensible defaults.
 func Load() *Config {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -29,11 +30,16 @@ func Load() *Config {
 		host = "0.0.0.0"
 	}
 
+	env := os.Getenv("APP_ENV")
+	if env == "" {
+		env = "development"
+	}
+
 	staticDir := os.Getenv("STATIC_DIR")
 	if staticDir == "" {
-		// In production container, static assets are in ./public
-		// If running locally from repo root or backend dir, fallback gracefully
-		if _, err := os.Stat("./public"); err == nil {
+		if env == "production" {
+			staticDir = "/app/public"
+		} else if _, err := os.Stat("./public"); err == nil {
 			staticDir = "./public"
 		} else if _, err := os.Stat("../frontend/dist"); err == nil {
 			staticDir = "../frontend/dist"
@@ -42,23 +48,15 @@ func Load() *Config {
 		}
 	}
 
-	env := os.Getenv("APP_ENV")
-	if env == "" {
-		env = "development"
-	}
-
 	// Storage Root: photo storage directory (host bind-mount target)
 	storageRoot := os.Getenv("STORAGE_ROOT")
 	if storageRoot == "" {
 		if env == "production" {
 			storageRoot = "/media"
+		} else if _, err := os.Stat("/media"); err == nil {
+			storageRoot = "/media"
 		} else {
-			// In local dev, use local path if /media is absent
-			if _, err := os.Stat("/media"); err == nil {
-				storageRoot = "/media"
-			} else {
-				storageRoot = "./storage/media"
-			}
+			storageRoot = "./storage/media"
 		}
 	}
 
@@ -67,37 +65,65 @@ func Load() *Config {
 	if databasePath == "" {
 		if env == "production" {
 			databasePath = "/data/pixora.db"
+		} else if _, err := os.Stat("/data"); err == nil {
+			databasePath = "/data/pixora.db"
 		} else {
-			// In local dev, use local path if /data is absent
-			if _, err := os.Stat("/data"); err == nil {
-				databasePath = "/data/pixora.db"
-			} else {
-				databasePath = "./storage/data/pixora.db"
-			}
+			databasePath = "./storage/data/pixora.db"
 		}
 	}
 
 	return &Config{
-		Port:         port,
-		Host:         host,
-		StaticDir:    staticDir,
-		Env:          env,
-		StorageRoot:  filepath.Clean(storageRoot),
-		DatabasePath: filepath.Clean(databasePath),
+		Port:         strings.TrimSpace(port),
+		Host:         strings.TrimSpace(host),
+		StaticDir:    filepath.Clean(strings.TrimSpace(staticDir)),
+		Env:          strings.TrimSpace(env),
+		StorageRoot:  filepath.Clean(strings.TrimSpace(storageRoot)),
+		DatabasePath: filepath.Clean(strings.TrimSpace(databasePath)),
 	}
 }
 
-// OriginalsDir returns the absolute path for original photo storage
+// Validate verifies that required configuration values are present, valid, and safe.
+func (c *Config) Validate() error {
+	if c.Port == "" {
+		return fmt.Errorf("PORT cannot be empty")
+	}
+	portNum, err := strconv.Atoi(c.Port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("invalid PORT %q: must be an integer between 1 and 65535", c.Port)
+	}
+
+	if c.Host == "" {
+		return fmt.Errorf("HOST cannot be empty")
+	}
+
+	if c.StorageRoot == "" || c.StorageRoot == "." {
+		return fmt.Errorf("STORAGE_ROOT cannot be empty or relative current directory")
+	}
+	if strings.ContainsRune(c.StorageRoot, 0) {
+		return fmt.Errorf("STORAGE_ROOT contains illegal null byte")
+	}
+
+	if c.DatabasePath == "" || c.DatabasePath == "." {
+		return fmt.Errorf("DATABASE_PATH cannot be empty or relative current directory")
+	}
+	if strings.ContainsRune(c.DatabasePath, 0) {
+		return fmt.Errorf("DATABASE_PATH contains illegal null byte")
+	}
+
+	return nil
+}
+
+// OriginalsDir returns the path for original photo storage.
 func (c *Config) OriginalsDir() string {
 	return filepath.Join(c.StorageRoot, "originals")
 }
 
-// ThumbnailsDir returns the absolute path for generated thumbnail storage
+// ThumbnailsDir returns the path for generated thumbnail storage.
 func (c *Config) ThumbnailsDir() string {
 	return filepath.Join(c.StorageRoot, "thumbnails")
 }
 
-// TmpDir returns the absolute path for temporary upload processing
+// TmpDir returns the path for temporary upload processing.
 func (c *Config) TmpDir() string {
 	return filepath.Join(c.StorageRoot, "tmp")
 }
@@ -111,9 +137,8 @@ func (c *Config) ResolveStoragePath(relativePath string) (string, error) {
 	}
 
 	target := filepath.Join(c.StorageRoot, cleanRel)
-	// Ensure target is strictly within StorageRoot
 	relToRoot, err := filepath.Rel(c.StorageRoot, target)
-	if err != nil || strings.HasPrefix(relToRoot, "..") || relToRoot == "." && relativePath != "." {
+	if err != nil || strings.HasPrefix(relToRoot, "..") || (relToRoot == "." && relativePath != ".") {
 		return "", fmt.Errorf("path traversal detected: %s", relativePath)
 	}
 
@@ -122,6 +147,7 @@ func (c *Config) ResolveStoragePath(relativePath string) (string, error) {
 
 // CheckWritable verifies whether a directory is actually writable by testing
 // file creation. A directory existing does not imply write permissions.
+// NOTE: This must not be called during regular application startup against StorageRoot.
 func CheckWritable(dirPath string) error {
 	info, err := os.Stat(dirPath)
 	if err != nil {
@@ -131,7 +157,6 @@ func CheckWritable(dirPath string) error {
 		return fmt.Errorf("path is not a directory: %s", dirPath)
 	}
 
-	// Test write access by creating a temporary sentinel file
 	tmpFile, err := os.CreateTemp(dirPath, ".pixora_perm_check_*")
 	if err != nil {
 		return fmt.Errorf("directory is not writable: %w", err)
