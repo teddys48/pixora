@@ -14,7 +14,9 @@ import (
 	"pixora/backend/internal/api"
 	"pixora/backend/internal/config"
 	"pixora/backend/internal/database"
+	"pixora/backend/internal/media"
 	"pixora/backend/internal/repository"
+	"pixora/backend/internal/scanner"
 	"pixora/backend/internal/storage"
 )
 
@@ -25,6 +27,8 @@ type Dependencies struct {
 	Storage   *storage.Storage
 	PhotoRepo repository.PhotoRepository
 	AlbumRepo repository.AlbumRepository
+	Thumbnail *media.ThumbnailService
+	Scanner   *scanner.Scanner
 }
 
 // New creates and configures the Fiber application using Config only (backward compatibility).
@@ -91,10 +95,27 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 		apiGroup.Get("/albums/:id", api.GetAlbumHandler(deps.AlbumRepo))
 	}
 
-	// Photo routes
+	// Photo Collection and Upload routes
 	if deps.PhotoRepo != nil {
 		apiGroup.Get("/photos", api.ListPhotosHandler(deps.PhotoRepo))
+		apiGroup.Post("/photos", api.UploadPhotosHandler(deps.PhotoRepo, deps.Storage, deps.Thumbnail))
+		apiGroup.Post("/photos/upload", api.UploadPhotosHandler(deps.PhotoRepo, deps.Storage, deps.Thumbnail))
+	}
+
+	// Photo Media Scanner routes
+	if deps.Scanner != nil {
+		apiGroup.Get("/photos/scan", api.GetScanStatusHandler(deps.Scanner))
+		apiGroup.Get("/photos/scan/status", api.GetScanStatusHandler(deps.Scanner))
+		apiGroup.Post("/photos/scan", api.ScanPhotosHandler(deps.Scanner))
+	}
+
+	// Individual Photo and Asset Serving routes
+	if deps.PhotoRepo != nil {
 		apiGroup.Get("/photos/:id", api.GetPhotoHandler(deps.PhotoRepo))
+		if deps.Storage != nil {
+			apiGroup.Get("/photos/:id/file", api.ServeOriginalPhotoHandler(deps.PhotoRepo, deps.Storage))
+			apiGroup.Get("/photos/:id/thumbnail", api.ServeThumbnailHandler(deps.PhotoRepo, deps.Storage, deps.Thumbnail))
+		}
 	}
 
 	// Explicit 404 handler for unknown /api/* endpoints

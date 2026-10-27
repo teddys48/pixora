@@ -1,4 +1,4 @@
-import { Images, SearchX } from 'lucide-react'
+import { Images, SearchX, RefreshCw, UploadCloud } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 
 interface EmptyStateProps {
@@ -6,9 +6,18 @@ interface EmptyStateProps {
   searchQuery?: string
   onReset?: () => void
   onUploadClick?: () => void
+  onScanClick?: () => void
+  isScanning?: boolean
 }
 
-export function EmptyState({ isSearch, searchQuery, onReset, onUploadClick }: EmptyStateProps) {
+export function EmptyState({
+  isSearch,
+  searchQuery,
+  onReset,
+  onUploadClick,
+  onScanClick,
+  isScanning,
+}: EmptyStateProps) {
   if (isSearch) {
     return (
       <div className="flex flex-col items-center justify-center p-12 text-center border border-dashed border-border rounded-2xl bg-card/40 my-8">
@@ -34,14 +43,31 @@ export function EmptyState({ isSearch, searchQuery, onReset, onUploadClick }: Em
         <Images className="w-7 h-7 stroke-[1.5]" />
       </div>
       <h3 className="text-lg font-semibold text-foreground mb-1">Your gallery is empty</h3>
-      <p className="text-sm text-muted-foreground max-w-sm mb-5 leading-relaxed">
-        Upload your first photograph to start curating your personal gallery collection.
+      <p className="text-sm text-muted-foreground max-w-md mb-6 leading-relaxed">
+        Upload photos directly or scan existing images from the mounted media directory to populate your gallery.
       </p>
-      {onUploadClick && (
-        <Button onClick={onUploadClick} size="md">
-          Upload Photos
-        </Button>
-      )}
+
+      <div className="flex flex-wrap items-center justify-center gap-3">
+        {onUploadClick && (
+          <Button onClick={onUploadClick} size="md" className="gap-2">
+            <UploadCloud className="w-4 h-4" />
+            <span>Upload Photos</span>
+          </Button>
+        )}
+
+        {onScanClick && (
+          <Button
+            variant="outline"
+            size="md"
+            onClick={onScanClick}
+            disabled={isScanning}
+            className="gap-2"
+          >
+            <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin text-primary' : ''}`} />
+            <span>{isScanning ? 'Scanning Media...' : 'Scan Existing Media'}</span>
+          </Button>
+        )}
+      </div>
     </div>
   )
 }

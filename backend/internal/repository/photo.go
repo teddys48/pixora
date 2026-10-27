@@ -15,6 +15,8 @@ import (
 // PhotoRepository defines data access methods for photos.
 type PhotoRepository interface {
 	Create(ctx context.Context, p *models.Photo) error
+	Update(ctx context.Context, p *models.Photo) error
+	Delete(ctx context.Context, id string) error
 	GetByID(ctx context.Context, id string) (*models.Photo, error)
 	GetByRelativePath(ctx context.Context, relPath string) (*models.Photo, error)
 	List(ctx context.Context, offset, limit int, sortBy, order string) ([]models.Photo, int, error)
@@ -61,6 +63,50 @@ INSERT INTO photos (
 		return fmt.Errorf("failed to insert photo: %w", err)
 	}
 
+	return nil
+}
+
+// Update updates an existing photo record by ID.
+func (r *SQLitePhotoRepository) Update(ctx context.Context, p *models.Photo) error {
+	p.UpdatedAt = time.Now().UTC()
+	query := `
+UPDATE photos
+SET original_filename = ?, media_type = ?, file_size = ?,
+    width = ?, height = ?, taken_at = ?, file_modified_at = ?, updated_at = ?
+WHERE id = ?`
+
+	res, err := r.db.ExecContext(ctx, query,
+		p.OriginalFilename, p.MediaType, p.FileSize,
+		p.Width, p.Height, p.TakenAt, p.FileModifiedAt, p.UpdatedAt,
+		p.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update photo: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Delete removes a photo record by ID.
+func (r *SQLitePhotoRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM photos WHERE id = ?`
+	res, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete photo: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
@@ -133,6 +179,8 @@ func (r *SQLitePhotoRepository) List(ctx context.Context, offset, limit int, sor
 	case "date":
 		// Prefer taken_at, fallback to file_modified_at then created_at
 		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
+	case "modified":
+		orderByClause = fmt.Sprintf("file_modified_at %s, id ASC", dir)
 	case "filename":
 		orderByClause = fmt.Sprintf("original_filename %s, id ASC", dir)
 	case "size":

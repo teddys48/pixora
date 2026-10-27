@@ -15,6 +15,8 @@ export function App() {
   const [activePhotosList, setActivePhotosList] = useState<Photo[]>(MOCK_PHOTOS)
   const [isLightboxOpen, setIsLightboxOpen] = useState(false)
   const [folderFilter, setFolderFilter] = useState<string | null>(null)
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
+  const [uploadRefreshKey, setUploadRefreshKey] = useState(0)
 
   const handleSelectPhoto = (photo: Photo, list: Photo[]) => {
     setSelectedPhoto(photo)
@@ -31,15 +33,26 @@ export function App() {
     setFolderFilter(null)
   }
 
+  const handleUploadSuccess = () => {
+    // Trigger gallery reload
+    setUploadRefreshKey((k) => k + 1)
+  }
+
   return (
-    <AppLayout>
+    <AppLayout
+      uploadModalOpen={isUploadModalOpen}
+      onOpenUploadModal={() => setIsUploadModalOpen(true)}
+      onCloseUploadModal={() => setIsUploadModalOpen(false)}
+      onUploadSuccess={handleUploadSuccess}
+    >
       <Routes>
         <Route
           path="/"
           element={
             <PhotosPage
+              key={uploadRefreshKey}
               onSelectPhoto={handleSelectPhoto}
-              onUploadClick={() => {}}
+              onUploadClick={() => setIsUploadModalOpen(true)}
               folderFilter={folderFilter}
               onClearFolderFilter={handleClearFolderFilter}
             />
@@ -49,8 +62,9 @@ export function App() {
           path="/photos"
           element={
             <PhotosPage
+              key={uploadRefreshKey}
               onSelectPhoto={handleSelectPhoto}
-              onUploadClick={() => {}}
+              onUploadClick={() => setIsUploadModalOpen(true)}
               folderFilter={folderFilter}
               onClearFolderFilter={handleClearFolderFilter}
             />
@@ -69,8 +83,9 @@ export function App() {
           path="*"
           element={
             <PhotosPage
+              key={uploadRefreshKey}
               onSelectPhoto={handleSelectPhoto}
-              onUploadClick={() => {}}
+              onUploadClick={() => setIsUploadModalOpen(true)}
             />
           }
         />

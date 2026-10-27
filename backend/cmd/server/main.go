@@ -10,7 +10,9 @@ import (
 
 	"pixora/backend/internal/config"
 	"pixora/backend/internal/database"
+	"pixora/backend/internal/media"
 	"pixora/backend/internal/repository"
+	"pixora/backend/internal/scanner"
 	"pixora/backend/internal/server"
 	"pixora/backend/internal/storage"
 )
@@ -51,12 +53,18 @@ func main() {
 	photoRepo := repository.NewSQLitePhotoRepository(db)
 	albumRepo := repository.NewSQLiteAlbumRepository(db)
 
+	// Initialize Media Services (Thumbnails & Scanner)
+	thumbSvc := media.NewThumbnailService(store)
+	mediaScanner := scanner.New(store, photoRepo)
+
 	app := server.NewWithDependencies(server.Dependencies{
 		Config:    cfg,
 		DB:        db,
 		Storage:   store,
 		PhotoRepo: photoRepo,
 		AlbumRepo: albumRepo,
+		Thumbnail: thumbSvc,
+		Scanner:   mediaScanner,
 	})
 
 	addr := fmt.Sprintf("%s:%s", cfg.Host, cfg.Port)

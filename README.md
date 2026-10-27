@@ -12,6 +12,7 @@ Pixora uses a modern, unified single-container architecture:
 - **Frontend:** React 18, TypeScript (strict), Vite, Tailwind CSS, Lucide icons, and React Router.
 - **Backend:** Go 1.22+, Fiber v2 HTTP framework, and structured logging.
 - **Database:** SQLite with pure-Go driver (`modernc.org/sqlite`), versioned schema migrations, WAL journal mode, and foreign key enforcement.
+- **Image Processing:** Pure-Go decoders and encoders (`image/jpeg`, `image/png`, `image/gif`, `golang.org/x/image/webp`, `golang.org/x/image/tiff`), EXIF parser (`github.com/rwcarlsen/goexif`), and bilinear resampler (`golang.org/x/image/draw`) compatible with `CGO_ENABLED=0`.
 - **Unified Deployment:** A multi-stage `Dockerfile` compiles frontend static assets and the Go backend binary into a minimal Alpine container. The Go server directly serves both the compiled SPA assets (with client-side routing fallback) and `/api/*` REST endpoints.
 - **Persistent Storage:** Host-bound photo filesystem via bind mount (`/media`), completely separated from the SQLite database volume (`/data`).
 
@@ -23,6 +24,10 @@ Pixora uses a modern, unified single-container architecture:
                           │   ├── /api/health                            │
                           │   ├── /api/albums                            │
                           │   ├── /api/photos                            │
+                          │   │   ├── /scan (Initiate / Query Scan)      │
+                          │   │   ├── /upload (Multipart Photo Upload)   │
+                          │   │   ├── :id/file (Serve Original)          │
+                          │   │   └── :id/thumbnail (Serve Thumbnail)    │
                           │   └── /* (Static Assets & SPA Fallback)      │
                           │                                              │
                           │  Storage Architecture:                       │
@@ -49,19 +54,20 @@ Pixora maintains strict separation between photo assets and relational database 
 ### 2. Read-Only Bind Mount Support
 - Pixora fully supports mounting `/media` in read-only mode (`:ro`), ideal for browsing existing photo collections without risk of modification.
 - The server starts normally without requiring write access to `STORAGE_ROOT`.
-- Startup routines do not create test files or modify host directories.
-- Operations requiring write permissions (such as uploads and thumbnail generation in future phases) validate write access on-demand when invoked.
+- Media discovery and scanning only require read permissions; existing photos are indexed in-place without copying, renaming, or modifying host files.
+- Operations requiring write permissions (uploads and thumbnail generation) validate write access on-demand when invoked. If storage is mounted read-only, uploads return `403 Forbidden` (`storage_readonly`), and thumbnail requests fall back cleanly to serving the original photo.
 - Persistent database storage (`/data`) must remain writable for SQLite state and migrations.
 
 ### 3. Photo Directory Structure under `STORAGE_ROOT`
-Photo assets are conceptually organized into dedicated subdirectories under `STORAGE_ROOT`:
-- `/media/originals/`: Preservation of original photographs, referenced via relative paths.
-- `/media/thumbnails/`: High-performance generated thumbnails (`thumbnails/`).
-- `/media/tmp/`: Temporary processing area for file validation and atomic moves (`tmp/`).
+Photo assets are organized into dedicated subdirectories under `STORAGE_ROOT`:
+- **Existing User Photos:** Retained in their original directory structure (e.g. `/media/vacation/beach.jpg`, `/media/2026/10/img.jpg`). Existing files are indexed without moving or copying.
+- `/media/originals/`: Stores newly uploaded photographs using UUID filenames, preserving original extensions.
+- `/media/thumbnails/`: High-performance generated JPEG thumbnails (`thumbnails/<id>.jpg`), automatically excluded from media discovery.
+- `/media/tmp/`: Temporary processing area for file upload streaming, validation, and atomic moves (`tmp/`), automatically excluded from media discovery.
 
 ### 4. Relative Database Paths & Path Traversal Protection
 - Host-specific or container-specific absolute paths are **never** stored in database records.
-- Records store clean relative paths (e.g. `originals/2026/10/img_1234.jpg`).
+- Records store clean relative paths (e.g. `vacation/beach.jpg` or `originals/<uuid>.jpg`).
 - The storage abstraction (`internal/storage`) validates all paths, rejecting lexical traversal (`../`, absolute paths, null bytes) and symlinks that resolve outside `STORAGE_ROOT`.
 
 ### 5. Non-Root Container Permissions & Host Ownership
@@ -78,286 +84,121 @@ chmod -R u+rwX,g+rwX /home/user/Pictures
 
 ---
 
-## Database Architecture & Migrations
+## Media Discovery & Scanning
 
-Pixora uses SQLite with `modernc.org/sqlite`, a pure Go driver compatible with `CGO_ENABLED=0` static builds.
+Pixora discovers and indexes existing photos directly from `STORAGE_ROOT`:
 
-- **Foreign Keys:** Enforced on every connection (`PRAGMA foreign_keys = ON;`).
-- **Journal Mode:** Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) for concurrent read access without blocking readers during writes.
-- **Busy Timeout:** 5000ms (`PRAGMA busy_timeout = 5000;`).
-- **Connection Pool:** Max 10 open connections, 5 idle connections, 1 hour lifetime.
-- **Schema Migrations:** Version-controlled migration system (`schema_migrations` table) executed sequentially inside atomic database transactions.
-
-### Database Schema (Version 1)
-
-- **`photos`**:
-  - `id` (TEXT PRIMARY KEY) — UUID.
-  - `relative_path` (TEXT NOT NULL UNIQUE) — Storage path relative to `STORAGE_ROOT`.
-  - `original_filename` (TEXT NOT NULL).
-  - `media_type` (TEXT NOT NULL) — MIME type.
-  - `file_size` (INTEGER NOT NULL) — In bytes.
-  - `width` (INTEGER NULLABLE), `height` (INTEGER NULLABLE).
-  - `taken_at` (DATETIME NULLABLE) — Capture time.
-  - `file_modified_at` (DATETIME NOT NULL).
-  - `created_at` (DATETIME NOT NULL), `updated_at` (DATETIME NOT NULL).
-  - *Indexes:* `idx_photos_taken_at`, `idx_photos_created_at`, `idx_photos_relative_path`.
-
-- **`albums`**:
-  - `id` (TEXT PRIMARY KEY) — UUID.
-  - `name` (TEXT NOT NULL).
-  - `description` (TEXT NOT NULL DEFAULT '').
-  - `created_at` (DATETIME NOT NULL), `updated_at` (DATETIME NOT NULL).
-  - *Indexes:* `idx_albums_name`.
-
-- **`photo_albums`** (Virtual album join table):
-  - `photo_id` (TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE).
-  - `album_id` (TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE).
-  - `added_at` (DATETIME NOT NULL).
-  - *Primary Key:* `(photo_id, album_id)`.
-  - *Indexes:* `idx_photo_albums_album_id`, `idx_photo_albums_photo_id`.
+- **In-Place Indexing:** Existing photos remain in their folders and are never moved, renamed, or modified.
+- **Supported Formats:** JPEG (`.jpg`, `.jpeg`), PNG (`.png`), WebP (`.webp`), GIF (`.gif`), and TIFF (`.tif`, `.tiff`).
+- **Directory Walking:** Recursively traverses subdirectories while ignoring thumbnails (`thumbnails/`), temporary files (`tmp/`), and hidden/dot directories (`.git`, `.hidden`).
+- **Duplicate Prevention:** Records are uniquely keyed by `relative_path` in SQLite. Subsequent scans check file modification times and sizes; unchanged files are skipped instantly without re-processing.
+- **Reconciliation:** If a file's size or timestamp changes on disk, its metadata (dimensions, timestamps) is automatically re-extracted and updated in the database without altering its stable photo ID.
+- **Fault-Tolerant:** Corrupt or incomplete images are counted as failed and logged without interrupting the discovery of valid files.
+- **Symlink Protection:** Symlinks resolving outside `STORAGE_ROOT` are safely rejected.
+- **Concurrency Control:** Atomic locking ensures only one media scan can run at any given time, preventing duplicate database entries and resource exhaustion.
 
 ---
 
-## Repository Structure
+## Photo Upload Pipeline
 
-```
-pixora/
-├── backend/                      # Go Fiber backend service
-│   ├── cmd/
-│   │   └── server/
-│   │       └── main.go           # Application entrypoint & graceful shutdown
-│   ├── internal/
-│   │   ├── api/                  # API handlers and standard JSON envelopes
-│   │   │   ├── albums.go         # Album listing and creation handlers
-│   │   │   ├── api_test.go       # API integration tests
-│   │   │   ├── health.go         # Health check handler (DB & storage status)
-│   │   │   ├── health_test.go    # Health check tests
-│   │   │   ├── photos.go         # Photo listing and lookup handlers
-│   │   │   └── response.go       # Standard error response helper
-│   │   ├── config/               # Centralized configuration & validation
-│   │   │   ├── config.go         # Env loader, validation, defaults
-│   │   │   └── config_test.go    # Config tests (valid & invalid values)
-│   │   ├── database/             # SQLite connection & migration engine
-│   │   │   ├── db.go             # DB connection, PRAGMAs, pool configuration
-│   │   │   ├── db_test.go        # Foreign keys, constraints, migration tests
-│   │   │   └── migrations.go     # Versioned schema migrations
-│   │   ├── models/               # Domain models (Photo, Album, PhotoAlbum)
-│   │   │   └── models.go
-│   │   ├── repository/           # Data access repository layer
-│   │   │   ├── album.go          # SQLite album repository implementation
-│   │   │   ├── errors.go         # Common repository errors
-│   │   │   ├── photo.go          # SQLite photo repository implementation
-│   │   │   └── repository_test.go # Repository CRUD, sorting, and pagination tests
-│   │   ├── server/               # Fiber router, middleware, and static serving
-│   │   │   ├── integration_test.go # Unified frontend/backend tests
-│   │   │   ├── server.go         # Server assembly with dependency injection
-│   │   │   └── server_test.go    # Route tests
-│   │   └── storage/              # Storage abstraction & path traversal safeguards
-│   │       ├── storage.go        # Path resolution, read/write checks
-│   │       └── storage_test.go   # Traversal, symlink, read-only tests
-│   ├── go.mod
-│   └── go.sum
-├── frontend/                     # React + TypeScript + Vite frontend
-│   ├── public/
-│   │   └── favicon.svg           # Application SVG icon
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── folders/          # FolderCard, CreateFolderModal
-│   │   │   ├── gallery/          # PhotoCard, GalleryControls, LightboxModal, states
-│   │   │   ├── layout/           # AppLayout, Sidebar, Header, HealthBadge, ThemeToggle
-│   │   │   └── ui/               # Button, Input, Modal, Badge, Skeleton, FallbackImage
-│   │   ├── context/
-│   │   │   └── ThemeContext.tsx  # Light/dark/system theme state & localStorage
-│   │   ├── data/
-│   │   │   └── mock/             # Dedicated mock datasets (photos, folders)
-│   │   ├── lib/
-│   │   │   ├── api.ts            # Centralized API client & health check
-│   │   │   └── utils.ts          # Class merging, date & byte formatters
-│   │   ├── pages/
-│   │   │   ├── PhotosPage.tsx    # Gallery landing with search, sort, and grid/list view
-│   │   │   ├── TimelinePage.tsx  # Chronological date-grouped browsing
-│   │   │   └── FoldersPage.tsx   # Album collections overview & prototype modal
-│   │   ├── types/                # TypeScript models (Photo, Folder, Health)
-│   │   ├── App.tsx               # Client routes and Lightbox orchestration
-│   │   ├── main.tsx              # React DOM mounting
-│   │   └── index.css             # Tailwind base styles and semantic tokens
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── tailwind.config.js
-│   └── vite.config.ts
-├── Dockerfile                    # Multi-stage build (Node 22 + Go 1.24 -> Alpine 3.21)
-├── docker-compose.yml            # Compose configuration with host bind mount & data volume
-├── .dockerignore                 # Excludes build caches, secrets, and node_modules
-├── .env.example                  # Documented environment variables with read-only notes
-├── AGENTS.md                     # Engineering standards & phase rules
-└── PROJECT_STATUS.md             # Implementation inventory & phase tracking
-```
+New photos can be uploaded via `POST /api/photos` or `POST /api/photos/upload`:
+
+- **Content Validation:** The server sniffs magic bytes and inspects image headers rather than trusting client filenames or `Content-Type` headers.
+- **Streaming Uploads:** Multipart files are streamed directly into temporary files under `tmp/` using bounded readers, preventing buffer exhaustion.
+- **Collision Avoidance:** Server assigns collision-safe UUID filenames (`originals/<uuid>.<ext>`), storing original filenames in database metadata.
+- **Decompression Bomb Protection:** Pre-validates decoded image dimensions against safety thresholds (max 15,000px per dimension, max 100 megapixels total).
+- **Atomic Commits:** Files are moved atomically into `originals/`. If database persistence fails, uploaded files and generated thumbnails are immediately cleaned up.
+- **Upload Limits:**
+  - Max file size: 25MB per file.
+  - Max batch size: 20 files per request.
 
 ---
 
-## Getting Started
+## Metadata & Thumbnail Generation
 
-### Prerequisites
-- Node.js 18+ and npm 9+
-- Go 1.22+
-- Docker or Podman (for containerized deployment)
-
----
-
-### Local Development
-
-#### 1. Backend Server
-In a terminal, start the Go server:
-
-```bash
-cd backend
-go run ./cmd/server
-```
-The backend automatically creates `./storage/data/pixora.db`, applies schema migrations, and listens on `http://localhost:8080`.
-
-Verify the health endpoint:
-```bash
-curl http://localhost:8080/api/health
-# Response: {"status":"ok","service":"pixora-api","version":"0.1.0","database":"connected","storage":"ready"}
-```
-
-#### 2. Frontend Development Server
-In a separate terminal, start Vite:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-Open `http://localhost:3000` in your browser. Requests to `/api/*` are automatically proxied to `http://localhost:8080`.
+- **Metadata Extraction:**
+  - MIME type from magic headers.
+  - Image dimensions (width and height).
+  - File size and modification time.
+  - Capture time (`taken_at`) extracted from EXIF `DateTimeOriginal` / `DateTime` when present.
+- **Orientation Normalization:** EXIF orientation tags (1–8) are respected during thumbnail creation, correctly rotating and flipping smartphone photos.
+- **Thumbnail Optimization:** High-quality bilinear resampling within a 400×400px bounding box preserving original aspect ratio. Encoded as optimized JPEG (85% quality).
+- **On-Demand & Cached:** Thumbnails are cached on disk under `thumbnails/<id>.jpg`. Subsequent requests serve the cached file with conditional HTTP caching (`ETag`, `304 Not Modified`, `Cache-Control`).
+- **Read-Only Fallback:** If `STORAGE_ROOT` is read-only and a thumbnail does not exist, the server falls back to serving the original photo.
 
 ---
 
-## Production Build & Unified Container
+## API Contract
 
-### Building Without Docker
-To build the static frontend and run it directly with the Go binary:
+### Health Check
+- `GET /api/health` — Checks backend service availability, SQLite database connection, and storage readiness.
 
-```bash
-# 1. Build frontend
-cd frontend
-npm run build
-cd ..
-
-# 2. Run backend pointing to built frontend assets
-cd backend
-STATIC_DIR=../frontend/dist go run ./cmd/server
-```
-Open `http://localhost:8080` to experience the fully compiled application served by Go.
-
-### Building With Docker
-
-The repository includes a multi-stage `Dockerfile`:
-- **Stage A (Node 22 Alpine):** Compiles static assets to `/app/frontend/dist`.
-- **Stage B (Go 1.24 Alpine):** Compiles static pure-Go binary with `CGO_ENABLED=0`.
-- **Stage C (Alpine 3.21 Runtime):** Runs non-root `pixora` (UID 1000) with volume mount points `/media` and `/data`.
-
-> **Note:** As specified in `AGENTS.md`, AI agents do not execute container commands directly. You can build and run the image manually with:
-
-```bash
-# Build the unified container
-docker build -t pixora:latest .
-
-# Run with host photo bind mount (read-only supported) and persistent database volume
-docker run --rm \
-  -p 8080:8080 \
-  -v /home/user/Pictures:/media:ro \
-  -v pixora-data:/data \
-  --name pixora pixora:latest
-
-# Verify health check in running container
-curl http://localhost:8080/api/health
-```
-
-Or using Docker Compose:
-```bash
-# Set your photos directory in .env or run directly:
-PIXORA_PHOTOS_DIR=/home/user/Pictures docker compose up --build
-```
-
----
-
-## Environment Variables
-
-| Variable | Default in Container | Local Dev Default | Description |
-|---|---|---|---|
-| `PORT` | `8080` | `8080` | Port on which the HTTP server listens |
-| `HOST` | `0.0.0.0` | `0.0.0.0` | Host address to bind |
-| `STATIC_DIR` | `/app/public` | `./frontend/dist` | Path to compiled frontend assets |
-| `STORAGE_ROOT` | `/media` | `./storage/media` | Target root directory for photo files |
-| `DATABASE_PATH` | `/data/pixora.db` | `./storage/data/pixora.db` | Target file path for SQLite database |
-| `APP_ENV` | `production` | `development` | Environment name (`development` or `production`) |
-
----
-
-## API Contract (Implemented in Phase 2)
-
-### `GET /api/health`
-Checks backend service availability, SQLite database connection, and storage readiness.
-
-**Response (200 OK):**
+### Photo Discovery & Scanning
+- `POST /api/photos/scan` — Initiates a media discovery scan.
+  - Query parameters: `sync=true` runs synchronously; default runs asynchronously.
+  - Returns `202 Accepted` with initial status, or `200 OK` when synchronous.
+  - Returns `409 Conflict` if a scan is already in progress.
+- `GET /api/photos/scan` (alias: `GET /api/photos/scan/status`) — Returns current or last scan progress:
 ```json
 {
-  "status": "ok",
-  "service": "pixora-api",
-  "version": "0.1.0",
-  "database": "connected",
-  "storage": "ready"
+  "status": "completed",
+  "scanned": 15,
+  "indexed": 12,
+  "updated": 0,
+  "skipped": 3,
+  "failed": 0,
+  "durationMs": 45
 }
 ```
 
-### `GET /api/photos`
-Retrieves a paginated list of indexed photos.
-- Query parameters:
-  - `limit` (integer, 1–100, default: 50)
-  - `offset` (integer, default: 0)
-  - `sort` (`date`, `filename`, `size`, `created`, default: `date`)
-  - `order` (`asc`, `desc`, default: `desc`)
-
-**Response (200 OK):**
+### Photo Collection & Retrieval
+- `GET /api/photos` — Paginated photo listing.
+  - Query parameters:
+    - `limit` (integer, default: 50, max: 100)
+    - `offset` (integer, default: 0)
+    - `sort` (`date`, `filename`, `size`, `created`, `modified`, default: `date`)
+    - `order` (`asc`, `desc`, default: `desc`)
+  - Returns:
 ```json
 {
-  "photos": [],
-  "total": 0,
+  "photos": [
+    {
+      "id": "e2f12c1b-...",
+      "relativePath": "vacation/beach.jpg",
+      "originalFilename": "beach.jpg",
+      "mediaType": "image/jpeg",
+      "fileSize": 1048576,
+      "width": 1920,
+      "height": 1080,
+      "takenAt": "2026-08-15T10:30:00Z",
+      "fileModifiedAt": "2026-10-20T12:00:00Z",
+      "createdAt": "2026-10-27T10:00:00Z",
+      "updatedAt": "2026-10-27T10:00:00Z",
+      "url": "/api/photos/e2f12c1b-.../file",
+      "thumbnailUrl": "/api/photos/e2f12c1b-.../thumbnail"
+    }
+  ],
+  "total": 1,
   "limit": 50,
   "offset": 0
 }
 ```
 
-### `GET /api/photos/:id`
-Retrieves a single photo by its stable ID.
+- `GET /api/photos/:id` — Retrieves metadata for a single photo.
+- `GET /api/photos/:id/file` — Securely serves the original photograph with `ETag` and `Cache-Control`.
+- `GET /api/photos/:id/thumbnail` — Serves the generated thumbnail with `ETag` and `Cache-Control`.
 
-### `GET /api/albums`
-Retrieves all virtual albums with their respective photo counts.
+### Photo Upload
+- `POST /api/photos` (alias: `POST /api/photos/upload`) — Upload one or multiple photos via `multipart/form-data` (`photos` field).
+  - Returns `201 Created` with created photo records.
+  - Returns `207 Multi-Status` on partial upload success with error list.
+  - Returns `403 Forbidden` if storage is read-only.
+  - Returns `400 Bad Request` or `422 Unprocessable Entity` on invalid files.
 
-**Response (200 OK):**
-```json
-{
-  "albums": [
-    {
-      "id": "c61b2a24-...",
-      "name": "Summer Vacation",
-      "description": "Beach trip",
-      "photoCount": 12,
-      "createdAt": "2026-10-27T12:00:00Z",
-      "updatedAt": "2026-10-27T12:00:00Z"
-    }
-  ]
-}
-```
-
-### `POST /api/albums`
-Creates a new virtual album.
-- Body: `{"name": "string (1-100 chars)", "description": "optional string"}`
-- Returns `201 Created` with created album, or `400 Bad Request` with structured error.
-
-### `GET /api/albums/:id`
-Retrieves a single album by its ID.
+### Virtual Albums
+- `GET /api/albums` — Lists virtual albums with photo counts.
+- `POST /api/albums` — Creates a new virtual album (`{"name": "...", "description": "..."}`).
+- `GET /api/albums/:id` — Retrieves album details.
 
 ---
 
@@ -365,7 +206,7 @@ Retrieves a single album by its ID.
 
 - **Phase 1 (Completed):** Foundation, UI components, mock data separation, light/dark themes, backend health API, persistent storage architecture design, unified multi-stage Dockerfile, automated test suite.
 - **Phase 2 (Completed):** Backend foundation & data model. SQLite integration with pure-Go driver (`modernc.org/sqlite`), versioned schema migrations, photo and album entities, repository layer, storage abstraction with path traversal guards, read-only media root support, and structured API error handling.
-- **Phase 3 (Next):** Photo upload pipeline, file validation, thumbnail generation under `STORAGE_ROOT`, and filesystem storage.
-- **Phase 4:** Persistent folder CRUD and photo categorization.
-- **Phase 5:** EXIF capture date extraction, timeline queries, and photo viewer pagination.
-- **Phase 6:** Hardening, security review, backups, and production deployment.
+- **Phase 3 (Completed):** Existing media discovery & recursive scanning, deduplication and change reconciliation, secure photo and thumbnail serving, metadata extraction (EXIF timestamps, dimensions, orientation), streaming upload pipeline, and frontend integration with real API.
+- **Phase 4 (Planned):** Persistent folder/album CRUD and photo categorization.
+- **Phase 5 (Planned):** Chronological timeline grouping by Month/Year and full lightbox keyboard viewer integration.
+- **Phase 6 (Planned):** Hardening, security review, backups, and production deployment.

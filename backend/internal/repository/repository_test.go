@@ -76,6 +76,27 @@ func TestPhotoRepositoryCRUDAndListing(t *testing.T) {
 		t.Errorf("Photo data mismatch: got %+v", fetched)
 	}
 
+	// Update photo
+	newWidth := 2048
+	fetched.Width = &newWidth
+	fetched.FileSize = 105000
+	if err := repo.Update(ctx, fetched); err != nil {
+		t.Fatalf("Failed to update photo: %v", err)
+	}
+	updated, err := repo.GetByID(ctx, "photo-1")
+	if err != nil {
+		t.Fatalf("Failed to get updated photo: %v", err)
+	}
+	if updated.FileSize != 105000 || *updated.Width != 2048 {
+		t.Errorf("Updated photo mismatch: got %+v", updated)
+	}
+
+	// Update non-existent photo
+	nonExistent := &models.Photo{ID: "not-found"}
+	if err := repo.Update(ctx, nonExistent); !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("Expected ErrNotFound on non-existent update, got: %v", err)
+	}
+
 	// Get non-existent
 	_, err = repo.GetByID(ctx, "does-not-exist")
 	if !errors.Is(err, repository.ErrNotFound) {
@@ -102,6 +123,7 @@ func TestPhotoRepositoryCRUDAndListing(t *testing.T) {
 		MediaType:        "image/jpeg",
 		FileSize:         204800,
 		TakenAt:          &earlier,
+		FileModifiedAt:   earlier,
 	}
 	p3 := &models.Photo{
 		ID:               "photo-3",
@@ -110,6 +132,7 @@ func TestPhotoRepositoryCRUDAndListing(t *testing.T) {
 		MediaType:        "image/jpeg",
 		FileSize:         51200,
 		TakenAt:          &later,
+		FileModifiedAt:   later,
 	}
 	if err := repo.Create(ctx, p2); err != nil {
 		t.Fatalf("Failed to create p2: %v", err)
@@ -136,6 +159,15 @@ func TestPhotoRepositoryCRUDAndListing(t *testing.T) {
 		t.Errorf("Unexpected sort order: %s, %s, %s", photos[0].ID, photos[1].ID, photos[2].ID)
 	}
 
+	// List sorted by modified asc
+	photosMod, _, err := repo.List(ctx, 0, 10, "modified", "asc")
+	if err != nil {
+		t.Fatalf("Failed to list photos by modified: %v", err)
+	}
+	if photosMod[0].ID != "photo-2" {
+		t.Errorf("Expected p2 first for modified asc, got %s", photosMod[0].ID)
+	}
+
 	// List with pagination: limit 1, offset 1
 	paged, total, err := repo.List(ctx, 1, 1, "date", "desc")
 	if err != nil {
@@ -143,6 +175,20 @@ func TestPhotoRepositoryCRUDAndListing(t *testing.T) {
 	}
 	if total != 3 || len(paged) != 1 || paged[0].ID != "photo-1" {
 		t.Errorf("Unexpected paged result: %+v, total: %d", paged, total)
+	}
+
+	// Delete photo
+	if err := repo.Delete(ctx, "photo-1"); err != nil {
+		t.Fatalf("Failed to delete photo: %v", err)
+	}
+	_, err = repo.GetByID(ctx, "photo-1")
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("Expected ErrNotFound after deletion, got: %v", err)
+	}
+
+	// Delete non-existent photo
+	if err := repo.Delete(ctx, "photo-1"); !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("Expected ErrNotFound on deleting non-existent photo, got: %v", err)
 	}
 }
 
