@@ -1,0 +1,33 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules/
+
+# Frontend build outputs
+frontend/dist/
+frontend/dist-ssr/
+
+# Backend build outputs
+backend/pixora-server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage
+*.out
+*.test
+coverage/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Local storage and temporary files
+storage/
+tmp/
+*.log

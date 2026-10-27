@@ -1,0 +1,32 @@
+services:
+  pixora:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pixora:v0.1.0
+    container_name: pixora-app
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - APP_ENV=production
+      - STORAGE_ROOT=/media
+      - DATABASE_PATH=/data/pixora.db
+    volumes:
+      # 1. Host-bound photo storage (e.g. /home/user/Pictures:/media or custom host path)
+      # Ensure host directory has read/write permissions for UID 1000 (pixora user)
+      # e.g.: sudo chown -R 1000:1000 /home/user/Pictures or chmod -R u+rwX,g+rwX /home/user/Pictures
+      - type: bind
+        source: ${PIXORA_PHOTOS_DIR:-./storage/media}
+        target: /media
+
+      # 2. Separate persistent volume for SQLite application database
+      - type: volume
+        source: pixora-data
+        target: /data
+    restart: unless-stopped
+
+volumes:
+  pixora-data:
+    name: pixora-data
