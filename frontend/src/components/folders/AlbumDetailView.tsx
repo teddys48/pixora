@@ -12,7 +12,6 @@ import {
   fetchAlbum,
   removePhotoFromAlbum,
   updateAlbum,
-  deleteAlbum,
 } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import {
@@ -36,7 +35,7 @@ interface AlbumDetailViewProps {
   onBack: () => void
   onSelectPhoto: (photo: Photo, photosList: Photo[]) => void
   onUpdateAlbum: (updated: Folder) => void
-  onDeleteAlbum: (albumId: string) => void
+  onDeleteAlbum: (albumId: string) => Promise<void> | void
 }
 
 export function AlbumDetailView({
@@ -132,8 +131,7 @@ export function AlbumDetailView({
   }
 
   const handleDelete = async (id: string) => {
-    await deleteAlbum(id)
-    onDeleteAlbum(id)
+    await onDeleteAlbum(id)
   }
 
   const filteredPhotos = useMemo(() => {

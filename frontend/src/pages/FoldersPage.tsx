@@ -112,7 +112,8 @@ export function FoldersPage({ onSelectPhoto }: FoldersPageProps) {
   const handleDeleteFolder = async (id: string) => {
     await deleteAlbum(id)
     setFolders((prev) => prev.filter((f) => f.id !== id))
-    if (albumId === id) {
+    setDeletingFolder(null)
+    if (albumId) {
       navigate('/folders?tab=albums')
     }
   }
