@@ -75,7 +75,8 @@ func (s *Scanner) Scan(ctx context.Context) (ScanStatus, error) {
 // ScanPath performs media discovery and indexing for a specific relative folder under storage root.
 // If relPath is empty, it scans the entire storage root.
 // Deduplication is enforced via relative_path; unchanged files are skipped, and no duplicates are created.
-func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string) (ScanStatus, error) {
+// Optional forceRefresh argument re-extracts metadata for existing records without modifying original files.
+func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefresh ...bool) (ScanStatus, error) {
 	if s.storage == nil {
 		return ScanStatus{Status: "failed"}, errors.New("storage unavailable")
 	}
@@ -87,6 +88,8 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string) (ScanStatu
 		return s.Status(), ErrScanInProgress
 	}
 	defer s.isScanning.Store(false)
+
+	isRefresh := len(forceRefresh) > 0 && forceRefresh[0]
 
 	startTime := time.Now().UTC()
 	s.statusMu.Lock()
@@ -217,13 +220,13 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string) (ScanStatu
 		// Check if photo is already in database
 		existing, err := s.photoRepo.GetByRelativePath(ctx, relPath)
 		if err == nil && existing != nil {
-			// Record exists: check if file was modified
-			if existing.FileSize == fileSize && existing.FileModifiedAt.Equal(fileModTime) {
+			// Record exists: check if file was modified (or force refresh requested)
+			if !isRefresh && existing.FileSize == fileSize && existing.FileModifiedAt.Equal(fileModTime) {
 				skipped++
 				return nil
 			}
 
-			// File changed: re-extract metadata and update
+			// File changed or refresh requested: re-extract metadata and update
 			meta, extractErr := s.inspectFile(relPath)
 			if extractErr != nil {
 				failed++
@@ -240,9 +243,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string) (ScanStatu
 				existing.Width = &meta.Width
 				existing.Height = &meta.Height
 			}
-			if meta.TakenAt != nil {
-				existing.TakenAt = meta.TakenAt
-			}
+			existing.TakenAt = meta.TakenAt
 			existing.UpdatedAt = time.Now().UTC()
 
 			if err := s.photoRepo.Update(ctx, existing); err != nil {

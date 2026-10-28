@@ -618,6 +618,23 @@ func TestScanAPI(t *testing.T) {
 	if photosResp.Total != 2 {
 		t.Errorf("Expected 2 indexed photos, got %d", photosResp.Total)
 	}
+
+	// 4. Force refresh scan: POST /api/photos/scan?sync=true&refresh=true
+	reqRefresh := httptest.NewRequest("POST", "/api/photos/scan?sync=true&refresh=true", nil)
+	respRefresh, err := app.Test(reqRefresh, -1)
+	if err != nil || respRefresh.StatusCode != fiber.StatusOK {
+		t.Fatalf("Failed to trigger refresh scan: %v", err)
+	}
+	refreshBody, _ := io.ReadAll(respRefresh.Body)
+	var refreshStatus struct {
+		Status  string 
+		Updated int    
+		Skipped int    
+	}
+	_ = json.Unmarshal(refreshBody, &refreshStatus)
+	if refreshStatus.Updated != 2 {
+		t.Errorf("Expected updated=2 on refresh scan, got %+v", refreshStatus)
+	}
 }
 
 func TestTimelineAndPhotoViewerAPI(t *testing.T) {
@@ -689,6 +706,15 @@ func TestTimelineAndPhotoViewerAPI(t *testing.T) {
 	}
 	if timeResp.Photos[2].IsUndated != true {
 		t.Errorf("Expected p-time-3 to be marked isUndated=true")
+	}
+	if timeResp.Photos[0].DateSource != "exif" || timeResp.Photos[0].IsUndated != false {
+		t.Errorf("Expected p-time-1 DateSource=exif IsUndated=false, got %s, %v", timeResp.Photos[0].DateSource, timeResp.Photos[0].IsUndated)
+	}
+	if timeResp.Photos[1].DateSource != "exif" || timeResp.Photos[1].IsUndated != false {
+		t.Errorf("Expected p-time-2 DateSource=exif IsUndated=false, got %s, %v", timeResp.Photos[1].DateSource, timeResp.Photos[1].IsUndated)
+	}
+	if timeResp.Photos[2].DateSource != "file_modified" || timeResp.Photos[2].IsUndated != true {
+		t.Errorf("Expected p-time-3 DateSource=file_modified IsUndated=true, got %s, %v", timeResp.Photos[2].DateSource, timeResp.Photos[2].IsUndated)
 	}
 
 	// Verify day grouping: exactly 2 groups (2026-10-24 with 2 photos, and undated with 1 photo)

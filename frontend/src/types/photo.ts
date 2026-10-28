@@ -18,6 +18,8 @@ export interface PhotoMetadata {
   height: number
 }
 
+export type DateSource = 'exif' | 'file_modified' | 'none'
+
 export interface Photo {
   id: string
   title: string
@@ -26,6 +28,7 @@ export interface Photo {
   thumbnailUrl: string
   fallbackDataUrl?: string
   date: string // ISO string: e.g. "2026-10-18T14:32:00Z"
+  dateSource?: DateSource
   takenAt?: string // EXIF capture date if available
   fileModifiedAt?: string
   isUndated?: boolean
@@ -54,6 +57,7 @@ export interface PhotoResponse {
   url: string
   thumbnailUrl: string
   isUndated?: boolean
+  dateSource?: DateSource
   exif?: ExifDetails
   prevId?: string
   nextId?: string

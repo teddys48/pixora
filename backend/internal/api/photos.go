@@ -31,6 +31,18 @@ const (
 	MaxUploadFilesCount = 20
 )
 
+// DateSource indicates the source and credibility of a photo's date.
+type DateSource string
+
+const (
+	// DateSourceExif indicates the timestamp was extracted from verified EXIF capture metadata.
+	DateSourceExif DateSource = "exif"
+	// DateSourceFileModified indicates the timestamp is a filesystem modification fallback.
+	DateSourceFileModified DateSource = "file_modified"
+	// DateSourceNone indicates no reliable date is available.
+	DateSourceNone DateSource = "none"
+)
+
 // PhotoResponse represents a photo formatted for client consumption.
 type PhotoResponse struct {
 	ID               string             `json:"id"`
@@ -48,6 +60,7 @@ type PhotoResponse struct {
 	URL              string             `json:"url"`
 	ThumbnailURL     string             `json:"thumbnailUrl"`
 	IsUndated        bool               `json:"isUndated"`
+	DateSource       string             `json:"dateSource"` // "exif", "file_modified", "none"
 	Exif             *media.ExifDetails `json:"exif,omitempty"`
 	PrevID           *string            `json:"prevId,omitempty"`
 	NextID           *string            `json:"nextId,omitempty"`
@@ -95,11 +108,21 @@ func decodeCursor(cursor string) (int, error) {
 	return offset, nil
 }
 
-// ToPhotoResponse converts a models.Photo into a PhotoResponse with API URLs and normalized folder path.
+// ToPhotoResponse converts a models.Photo into a PhotoResponse with API URLs, normalized folder path, and date source.
 func ToPhotoResponse(p models.Photo) PhotoResponse {
 	folder := filepath.ToSlash(filepath.Dir(p.RelativePath))
 	if folder == "." {
 		folder = ""
+	}
+
+	isUndated := p.TakenAt == nil || p.TakenAt.IsZero()
+	var dateSource string
+	if !isUndated {
+		dateSource = string(DateSourceExif)
+	} else if !p.FileModifiedAt.IsZero() && p.FileModifiedAt.Year() > 1970 {
+		dateSource = string(DateSourceFileModified)
+	} else {
+		dateSource = string(DateSourceNone)
 	}
 
 	return PhotoResponse{
@@ -117,7 +140,8 @@ func ToPhotoResponse(p models.Photo) PhotoResponse {
 		UpdatedAt:        p.UpdatedAt,
 		URL:              fmt.Sprintf("/api/photos/%s/file", p.ID),
 		ThumbnailURL:     fmt.Sprintf("/api/photos/%s/thumbnail", p.ID),
-		IsUndated:        p.TakenAt == nil,
+		IsUndated:        isUndated,
+		DateSource:       dateSource,
 	}
 }
 
@@ -673,7 +697,7 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 	}
 }
 
-// ScanPhotosHandler handles POST /api/photos/scan with optional ?path=... and ?sync=true.
+// ScanPhotosHandler handles POST /api/photos/scan with optional ?path=..., ?sync=true, and ?refresh=true.
 func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if s == nil {
@@ -682,9 +706,10 @@ func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 
 		isSync := c.Query("sync") == "true"
 		targetPath := c.Query("path")
+		forceRefresh := c.Query("refresh") == "true"
 
 		if isSync {
-			status, err := s.ScanPath(c.Context(), targetPath)
+			status, err := s.ScanPath(c.Context(), targetPath, forceRefresh)
 			if err != nil {
 				if errors.Is(err, scanner.ErrScanInProgress) {
 					return c.Status(fiber.StatusConflict).JSON(status)
@@ -701,7 +726,7 @@ func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 		}
 
 		go func() {
-			_, _ = s.ScanPath(context.Background(), targetPath)
+			_, _ = s.ScanPath(context.Background(), targetPath, forceRefresh)
 		}()
 
 		// Small delay to allow the scanner goroutine to update status

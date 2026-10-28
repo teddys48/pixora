@@ -216,8 +216,15 @@ Scope & Acceptance Criteria Met:
   - Keyboard navigation: `ArrowLeft`, `ArrowRight`, `Escape`, `I` (toggle metadata), `+`/`=`, `-`/`_`, `0` (reset zoom), strictly guarded against active input/textarea typing.
   - Comprehensive metadata sidebar (desktop) and bottom sheet (mobile): displays filename, capture date (with EXIF badge) vs fallback modified date, relative physical folder (never exposing server absolute paths), image dimensions, file size, and camera/lens/exposure EXIF details when present.
   - Context-preserving previous and next navigation across Timeline, Photos, physical Folders, and virtual Albums.
+- [x] **Metadata Consistency Audit & Unified Date-Source Policy:**
+  - **Identified Root Cause:** Photos cards rendered `p.takenAt || p.fileModifiedAt || p.createdAt` with a `<Calendar />` icon without distinguishing filesystem modification dates from verified capture dates. Meanwhile, Timeline strictly grouped photos lacking `takenAt` into "Undated Photos". Furthermore, the 50 undated photos in the user library are PNG screenshots and WebP files that genuinely lack EXIF metadata tags.
+  - **Unified 3-Tier Policy:**
+    1. *Verified EXIF Capture Timestamp (`dateSource: "exif"`):* Extracted with strict tag precedence (`DateTimeOriginal` -> `DateTimeDigitized` -> `DateTime`) and timezone offset support (`OffsetTimeOriginal`, `OffsetTimeDigitized`, `OffsetTime`). Displayed with `<Calendar />` in Photos, grouped by day in Timeline, and marked `isUndated: false`.
+    2. *Filesystem Modification Fallback (`dateSource: "file_modified"`):* Used when EXIF metadata is absent. Displayed on Photos cards with `<Clock />` and a distinct `mod`/`Modified` fallback badge and tooltip; placed under "Undated Photos" in Timeline; labeled "File Modified (Fallback)" in Photo Viewer.
+    3. *Genuinely Undated (`dateSource: "none"`):* Kept as "Undated" with `<HelpCircle />`; timestamps are never fabricated.
+  - **Safe Metadata Refresh Workflow:** Added `forceRefresh` support to `internal/scanner` (`ScanPath(ctx, relPath, true)`) and `POST /api/photos/scan?refresh=true`. Existing records can have metadata re-extracted without modifying host files or generating duplicate records.
 - [x] **Automated Tests:**
-  - 51 Go tests passing across all packages (`api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, `storage`), including dedicated `TestTimelineAndPhotoViewerAPI`, `TestExtractExifDetailsSafe`, `TestPhotoRepositoryTimelineAndAdjacent`, and `TestPhase5TimelineAndViewerLifecycle`.
+  - 52 Go tests passing across all packages (`api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, `storage`), including `TestScannerForceRefresh`, `TestTimelineAndPhotoViewerAPI`, `TestExtractExifDetailsSafe`, `TestPhotoRepositoryTimelineAndAdjacent`, and `TestPhase5TimelineAndViewerLifecycle`.
   - Frontend TypeScript verification (`npm run typecheck`) and production build (`npm run build`) passing cleanly with 0 errors.
 
 ### Phase 6 — Hardening & Deployment
@@ -248,7 +255,7 @@ Scope:
 | Physical Folders UI | Implemented | Read-only filesystem browsing, nested subfolder navigation, breadcrumbs, unindexed photo alerts, targeted scan button |
 | Virtual Albums UI | Implemented | Real SQLite albums from `/api/albums`, persistent creation, renaming, safe deletion, album detail view, photo assignment, remove photo |
 | Theme switching | Implemented | Light, dark, and system preference with localStorage persistence |
-| Automated tests | Verified | 51 Go tests passing across all packages; frontend typecheck and build passing cleanly (0 errors) |
+| Automated tests | Verified | 52 Go tests passing across all packages; frontend typecheck and build passing cleanly (0 errors) |
 | Unified Dockerfile | Implemented | Multi-Stage build (`CGO_ENABLED=0` statically compiled, non-root UID 1000) |
 
 ## 5. Architecture & Concepts: Physical Folders vs Virtual Albums
@@ -381,6 +388,8 @@ ok  	pixora/backend/internal/repository	0.010s
 --- PASS: TestScannerMissingStorageRoot (0.00s)
 === RUN   TestScannerScanSpecificFolder
 --- PASS: TestScannerScanSpecificFolder (0.02s)
+=== RUN   TestScannerForceRefresh
+--- PASS: TestScannerForceRefresh (0.01s)
 PASS
 ok  	pixora/backend/internal/scanner	0.124s
 === RUN   TestFrontendBackendUnifiedServing
@@ -420,7 +429,7 @@ ok  	pixora/backend/internal/server	0.143s
 PASS
 ok  	pixora/backend/internal/storage	0.005s
 
-All 51 Go tests passed (0 failures).
+All 52 Go tests passed (0 failures).
 ```
 
 ### Frontend Build & Lint Checks (`frontend`)

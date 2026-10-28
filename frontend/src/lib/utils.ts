@@ -14,8 +14,10 @@ export function formatBytes(bytes: number, decimals = 1): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`
 }
 
-export function formatDate(dateString: string): string {
+export function formatDate(dateString?: string): string {
+  if (!dateString) return 'Undated'
   const date = new Date(dateString)
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return 'Undated'
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
@@ -23,8 +25,10 @@ export function formatDate(dateString: string): string {
   }).format(date)
 }
 
-export function formatYearMonth(dateString: string): string {
+export function formatYearMonth(dateString?: string): string {
+  if (!dateString) return 'Undated'
   const date = new Date(dateString)
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return 'Undated'
   return new Intl.DateTimeFormat('en-US', {
     month: 'long',
     year: 'numeric',

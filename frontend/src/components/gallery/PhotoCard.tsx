@@ -2,7 +2,7 @@ import React from 'react'
 import { Photo, PhotoViewMode } from '@/types/photo'
 import { FallbackImage } from '@/components/ui/FallbackImage'
 import { formatDate, formatBytes } from '@/lib/utils'
-import { Calendar, Camera, Maximize2, X } from 'lucide-react'
+import { Calendar, Camera, Clock, HelpCircle, Maximize2, X } from 'lucide-react'
 
 interface PhotoCardProps {
   photo: Photo
@@ -25,6 +25,9 @@ export function PhotoCard({
       onSelect(photo)
     }
   }
+
+  const isCaptureDate = Boolean(photo.takenAt && !photo.isUndated)
+  const hasFallbackDate = Boolean(!isCaptureDate && photo.fileModifiedAt)
 
   if (viewMode === 'list') {
     return (
@@ -51,10 +54,28 @@ export function PhotoCard({
             </h3>
             <p className="text-xs text-muted-foreground truncate mt-0.5">{photo.filename}</p>
             <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1">
-                <Calendar className="w-3 h-3" />
-                {formatDate(photo.date)}
-              </span>
+              {isCaptureDate ? (
+                <span className="flex items-center gap-1" title="Verified EXIF capture date">
+                  <Calendar className="w-3 h-3 text-primary/80" />
+                  <span>{formatDate(photo.takenAt)}</span>
+                </span>
+              ) : hasFallbackDate ? (
+                <span
+                  className="flex items-center gap-1.5 text-muted-foreground"
+                  title="Filesystem modification time (fallback, no EXIF capture date)"
+                >
+                  <Clock className="w-3 h-3 opacity-70 text-amber-500/80" />
+                  <span>{formatDate(photo.fileModifiedAt)}</span>
+                  <span className="text-[10px] px-1 py-0.2 rounded bg-muted text-muted-foreground font-mono">
+                    Modified
+                  </span>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-muted-foreground/70" title="No reliable date available">
+                  <HelpCircle className="w-3 h-3 opacity-60" />
+                  <span>Undated</span>
+                </span>
+              )}
               {photo.metadata.camera && (
                 <span className="hidden sm:flex items-center gap-1 truncate">
                   <Camera className="w-3 h-3" />
@@ -159,10 +180,28 @@ export function PhotoCard({
         </div>
 
         <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-3 pt-2.5 border-t border-border/50">
-          <span className="flex items-center gap-1">
-            <Calendar className="w-3 h-3 opacity-70" />
-            {formatDate(photo.date)}
-          </span>
+          {isCaptureDate ? (
+            <span className="flex items-center gap-1" title="Verified EXIF capture date">
+              <Calendar className="w-3 h-3 opacity-70" />
+              <span>{formatDate(photo.takenAt)}</span>
+            </span>
+          ) : hasFallbackDate ? (
+            <span
+              className="flex items-center gap-1 text-muted-foreground"
+              title="Filesystem modification time (fallback, no EXIF capture date)"
+            >
+              <Clock className="w-3 h-3 opacity-70 text-amber-500/80" />
+              <span>{formatDate(photo.fileModifiedAt)}</span>
+              <span className="text-[9px] px-1 py-0.2 rounded bg-muted/80 text-muted-foreground border border-border/50">
+                mod
+              </span>
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-muted-foreground/70" title="No reliable date available">
+              <HelpCircle className="w-3 h-3 opacity-60" />
+              <span>Undated</span>
+            </span>
+          )}
           {photo.metadata.camera ? (
             <span className="truncate max-w-[120px] opacity-80" title={photo.metadata.camera}>
               {photo.metadata.camera.replace('Sony ', '').replace('Fujifilm ', '').replace('Canon EOS ', '')}

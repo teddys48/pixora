@@ -12,7 +12,10 @@ import { Folder, PhysicalFolder, FolderContents } from '@/types/folder'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
 export function toFrontendPhoto(p: PhotoResponse): Photo {
-  const date = p.takenAt || p.fileModifiedAt || p.createdAt
+  const isUndated = p.isUndated ?? (p.takenAt ? false : true)
+  const dateSource =
+    p.dateSource ?? (p.takenAt ? 'exif' : p.fileModifiedAt ? 'file_modified' : 'none')
+  const date = p.takenAt || p.fileModifiedAt || p.createdAt || ''
   // Clean filename without extension for title
   const title = p.originalFilename.replace(/\.[^/.]+$/, '')
   return {
@@ -22,9 +25,10 @@ export function toFrontendPhoto(p: PhotoResponse): Photo {
     url: p.url,
     thumbnailUrl: p.thumbnailUrl,
     date: date,
+    dateSource: dateSource,
     takenAt: p.takenAt,
     fileModifiedAt: p.fileModifiedAt,
-    isUndated: p.isUndated ?? (p.takenAt ? false : true),
+    isUndated: isUndated,
     size: p.fileSize,
     folder: p.folder,
     metadata: {
@@ -248,11 +252,13 @@ export async function uploadPhotos(
 export async function triggerScan(
   sync = false,
   path?: string,
+  refresh = false,
   signal?: AbortSignal
 ): Promise<ScanStatus> {
   const params = new URLSearchParams()
   if (sync) params.set('sync', 'true')
   if (path) params.set('path', path)
+  if (refresh) params.set('refresh', 'true')
 
   const url = `${API_BASE_URL}/photos/scan${params.toString() ? `?${params.toString()}` : ''}`
   const response = await fetch(url, {

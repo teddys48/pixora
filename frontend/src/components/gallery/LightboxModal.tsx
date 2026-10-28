@@ -412,9 +412,9 @@ export function LightboxModal({
               <div className="flex items-start gap-3">
                 <Clock className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-neutral-400 font-medium">File Modified</p>
+                  <p className="text-neutral-400 font-medium">File Modified (Fallback)</p>
                   <p className="text-neutral-200 mt-0.5">
-                    {formatDate(photo.fileModifiedAt || photo.date)}
+                    {photo.fileModifiedAt ? formatDate(photo.fileModifiedAt) : 'Unavailable'}
                   </p>
                 </div>
               </div>
@@ -538,7 +538,7 @@ export function LightboxModal({
           </div>
           <div className="flex items-center gap-3 text-[11px] text-neutral-400">
             <span>
-              {photo.takenAt ? formatDate(photo.takenAt) : 'Undated (No EXIF)'}
+              {photo.takenAt ? formatDate(photo.takenAt) : photo.fileModifiedAt ? 'Modified: ' + formatDate(photo.fileModifiedAt) : 'Undated'}
             </span>
             <span>•</span>
             <span>{photo.folder ? photo.folder : 'Root (/media)'}</span>

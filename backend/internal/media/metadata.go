@@ -38,6 +38,20 @@ const (
 	MaxTotalPixels = 100_000_000
 )
 
+// Date-Source Policy:
+// 1. Level 1 - Verified EXIF Capture Timestamp (dateSource: "exif"):
+//    Strict precedence: EXIF DateTimeOriginal -> EXIF DateTimeDigitized -> EXIF DateTime.
+//    Supports timezone offsets (OffsetTimeOriginal, OffsetTimeDigitized, OffsetTime).
+//    Parsed to UTC and persisted in SQLite `photos.taken_at`.
+// 2. Level 2 - Filesystem Fallback (dateSource: "file_modified"):
+//    Host filesystem modification time (os.FileInfo.ModTime().UTC()).
+//    Used solely as a secondary fallback for chronological browsing when capture date is missing.
+//    Stored in SQLite `photos.file_modified_at`. `photos.taken_at` remains NULL.
+//    Flagged as `isUndated: true` to prevent unverified dates from polluting capture history.
+// 3. Level 3 - Undated (dateSource: "none"):
+//    Photos lacking both valid capture metadata and reliable filesystem modification timestamps.
+//    Classified as `isUndated: true` with no fabricated timestamp.
+
 // ImageInfo contains extracted metadata from an image file.
 type ImageInfo struct {
 	MediaType   string
@@ -110,11 +124,18 @@ func parseExifTimestamp(raw string) (*time.Time, error) {
 		return nil, errors.New("empty or zero EXIF date")
 	}
 
-	// Standard EXIF format: "2006:01:02 15:04:05"
+	// Standard EXIF format: "2006:01:02 15:04:05", with support for ISO formats, timezones, and RFC3339
 	layouts := []string{
 		"2006:01:02 15:04:05",
+		"2006:01:02 15:04:05-07:00",
+		"2006:01:02 15:04:05 -07:00",
+		"2006:01:02 15:04:05Z07:00",
+		"2006:01:02 15:04:05Z",
 		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05 -07:00",
 		"2006:01:02 15:04",
+		"2006-01-02 15:04",
 		"2006-01-02T15:04:05Z07:00",
 		"2006-01-02T15:04:05",
 		time.RFC3339,
@@ -130,40 +151,81 @@ func parseExifTimestamp(raw string) (*time.Time, error) {
 	return nil, fmt.Errorf("unrecognized EXIF timestamp format %q", cleaned)
 }
 
+// parseExifTimestampWithOffset parses an EXIF timestamp with an optional timezone offset (e.g. "+07:00" or "-05:00").
+func parseExifTimestampWithOffset(raw string, offset string) (*time.Time, error) {
+	cleaned := strings.Trim(strings.TrimSpace(raw), "\"")
+	cleanedOffset := strings.Trim(strings.TrimSpace(offset), "\"")
+	if cleaned == "" || strings.HasPrefix(cleaned, "0000:00:00") {
+		return nil, errors.New("empty or zero EXIF date")
+	}
+
+	if cleanedOffset != "" && (strings.HasPrefix(cleanedOffset, "+") || strings.HasPrefix(cleanedOffset, "-")) {
+		combined := cleaned + cleanedOffset
+		layoutsWithOffset := []string{
+			"2006:01:02 15:04:05-07:00",
+			"2006:01:02 15:04:05 -07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05 -07:00",
+			"2006-01-02T15:04:05-07:00",
+		}
+		for _, layout := range layoutsWithOffset {
+			if t, err := time.Parse(layout, combined); err == nil && !t.IsZero() && t.Year() > 1970 {
+				utc := t.UTC()
+				return &utc, nil
+			}
+		}
+	}
+
+	return parseExifTimestamp(cleaned)
+}
+
+func getExifStringVal(x *exif.Exif, name exif.FieldName) string {
+	if tag, err := x.Get(name); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			return strings.Trim(strings.TrimSpace(val), "\"")
+		}
+	}
+	return ""
+}
+
 // ExtractCaptureDateFromExif extracts the best capture date from EXIF adhering to strict precedence:
 // 1. EXIF DateTimeOriginal (primary photo capture instant)
 // 2. EXIF DateTimeDigitized (alternative valid capture timestamp)
 // 3. EXIF DateTime (EXIF file timestamp)
 // 4. Returns nil if no valid EXIF date is found
+// Timezone offset tags (OffsetTimeOriginal, OffsetTimeDigitized, OffsetTime) are respected if present.
 func ExtractCaptureDateFromExif(x *exif.Exif) *time.Time {
 	if x == nil {
 		return nil
 	}
 
 	// 1. Try DateTimeOriginal
-	if tag, err := x.Get(exif.DateTimeOriginal); err == nil && tag != nil {
-		if val, err := tag.StringVal(); err == nil {
-			if parsed, err := parseExifTimestamp(val); err == nil {
-				return parsed
-			}
+	if val := getExifStringVal(x, exif.DateTimeOriginal); val != "" {
+		offset := getExifStringVal(x, exif.FieldName("OffsetTimeOriginal"))
+		if offset == "" {
+			offset = getExifStringVal(x, exif.FieldName("OffsetTime"))
+		}
+		if parsed, err := parseExifTimestampWithOffset(val, offset); err == nil {
+			return parsed
 		}
 	}
 
 	// 2. Try DateTimeDigitized
-	if tag, err := x.Get(exif.DateTimeDigitized); err == nil && tag != nil {
-		if val, err := tag.StringVal(); err == nil {
-			if parsed, err := parseExifTimestamp(val); err == nil {
-				return parsed
-			}
+	if val := getExifStringVal(x, exif.DateTimeDigitized); val != "" {
+		offset := getExifStringVal(x, exif.FieldName("OffsetTimeDigitized"))
+		if offset == "" {
+			offset = getExifStringVal(x, exif.FieldName("OffsetTime"))
+		}
+		if parsed, err := parseExifTimestampWithOffset(val, offset); err == nil {
+			return parsed
 		}
 	}
 
 	// 3. Try DateTime
-	if tag, err := x.Get(exif.DateTime); err == nil && tag != nil {
-		if val, err := tag.StringVal(); err == nil {
-			if parsed, err := parseExifTimestamp(val); err == nil {
-				return parsed
-			}
+	if val := getExifStringVal(x, exif.DateTime); val != "" {
+		offset := getExifStringVal(x, exif.FieldName("OffsetTime"))
+		if parsed, err := parseExifTimestampWithOffset(val, offset); err == nil {
+			return parsed
 		}
 	}
 

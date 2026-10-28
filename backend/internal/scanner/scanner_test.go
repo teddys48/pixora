@@ -321,3 +321,39 @@ func TestScannerScanSpecificFolder(t *testing.T) {
 		t.Errorf("Expected status 'failed' for path traversal, got %s", statusBad.Status)
 	}
 }
+
+func TestScannerForceRefresh(t *testing.T) {
+	store, repo, mediaDir, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	_ = os.WriteFile(filepath.Join(mediaDir, "test.jpg"), createTestJPEG(640, 480), 0644)
+
+	s := scanner.New(store, repo)
+	ctx := t.Context()
+
+	// Initial scan: indexes the photo
+	status1, err := s.Scan(ctx)
+	if err != nil || status1.Indexed != 1 {
+		t.Fatalf("Initial scan failed: %v, status: %+v", err, status1)
+	}
+
+	// Repeated scan without refresh: skips the unchanged photo
+	status2, err := s.Scan(ctx)
+	if err != nil || status2.Skipped != 1 || status2.Updated != 0 {
+		t.Fatalf("Repeated scan should skip: %v, status: %+v", err, status2)
+	}
+
+	// Scan with forceRefresh=true: re-extracts and updates without creating duplicates
+	statusRefresh, err := s.ScanPath(ctx, "", true)
+	if err != nil {
+		t.Fatalf("Force refresh scan failed: %v", err)
+	}
+	if statusRefresh.Updated != 1 || statusRefresh.Indexed != 0 {
+		t.Errorf("Expected 1 updated, 0 indexed on force refresh, got: %+v", statusRefresh)
+	}
+
+	total, _ := repo.Count(ctx)
+	if total != 1 {
+		t.Errorf("Expected total count=1 (no duplicates), got %d", total)
+	}
+}
