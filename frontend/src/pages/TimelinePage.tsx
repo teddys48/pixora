@@ -113,26 +113,30 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
     } finally {
       setIsLoadingMore(false)
     }
-  };
+  }
 
   // Group photos into Month Sections containing Day Groups, plus a separate Undated Group
   const { monthSections, undatedPhotos } = useMemo(() => {
-    const dated: Photo[] = []
+    const dated: { photo: Photo; dateStr: string }[] = []
     const undated: Photo[] = []
 
     for (const p of timelinePhotos) {
-      if (p.takenAt && !p.isUndated) {
-        dated.push(p)
-      } else {
-        undated.push(p)
+      const rawDate = p.takenAt || p.fileModifiedAt || p.date
+      if (rawDate) {
+        const d = new Date(rawDate)
+        if (!isNaN(d.getTime()) && d.getFullYear() > 1970) {
+          dated.push({ photo: p, dateStr: rawDate })
+          continue
+        }
       }
+      undated.push(p)
     }
 
     // Map day groups for dated photos
     const dayMap = new Map<string, DayGroup>()
 
-    for (const p of dated) {
-      const d = new Date(p.takenAt!)
+    for (const item of dated) {
+      const d = new Date(item.dateStr)
       const dayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
         d.getDate()
       ).padStart(2, '0')}`
@@ -141,13 +145,13 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
       if (!dayMap.has(dayKey)) {
         dayMap.set(dayKey, {
           dayKey,
-          label: formatDayLabel(p.takenAt!),
+          label: formatDayLabel(item.dateStr),
           yearMonthKey,
-          yearMonthLabel: formatMonthLabel(p.takenAt!),
+          yearMonthLabel: formatMonthLabel(item.dateStr),
           photos: [],
         })
       }
-      dayMap.get(dayKey)!.photos.push(p)
+      dayMap.get(dayKey)!.photos.push(item.photo)
     }
 
     // Group day groups under Month sections
@@ -219,7 +223,7 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
             </span>
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Chronological journey through your photos, grouped by capture date with verified EXIF timestamps.
+            Chronological journey through your photos, grouped by date.
           </p>
         </div>
       </div>
@@ -303,8 +307,7 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
                       </span>
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                      These photos lack valid EXIF capture date metadata. To preserve chronological accuracy,
-                      dates are not fabricated; photos are ordered by file modification time.
+                      These photos lack reliable date metadata and cannot be placed on the timeline.
                     </p>
                   </div>
                 </div>
