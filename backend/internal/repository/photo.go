@@ -13,6 +13,22 @@ import (
 	"pixora/backend/internal/models"
 )
 
+// PhotoFilter defines search, filter, and sorting criteria for querying photos.
+type PhotoFilter struct {
+	Query     string     // Substring match on original_filename or relative_path
+	StartDate *time.Time // Inclusive start instant for verified capture date (taken_at)
+	EndDate   *time.Time // Inclusive end instant for verified capture date (taken_at)
+	Folder    string     // Relative physical folder path
+	Recursive bool       // Whether to include photos in child subfolders (default true)
+	AlbumID   string     // Virtual album UUID
+	MediaType string     // MIME type (e.g. "image/jpeg") or prefix (e.g. "image/*")
+	IsUndated *bool      // If true: taken_at IS NULL; if false: taken_at IS NOT NULL
+	SortBy    string     // "date", "modified", "filename", "size", "created"
+	SortOrder string     // "desc", "asc"
+	Offset    int
+	Limit     int
+}
+
 // PhotoRepository defines data access methods for photos.
 type PhotoRepository interface {
 	Create(ctx context.Context, p *models.Photo) error
@@ -27,6 +43,8 @@ type PhotoRepository interface {
 	GetFolderCoverPhoto(ctx context.Context, folderPath string) (*models.Photo, error)
 	ListTimeline(ctx context.Context, offset, limit int) ([]models.Photo, int, error)
 	GetAdjacentPhotos(ctx context.Context, id string, collectionType string, collectionID string) (prevID *string, nextID *string, err error)
+	SearchAndFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error)
+	ListTimelineWithFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error)
 }
 
 // SQLitePhotoRepository implements PhotoRepository using SQLite.
@@ -45,6 +63,111 @@ func cleanFolderPath(p string) string {
 		return ""
 	}
 	return cleaned
+}
+
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+func buildPhotoFilterConditions(filter PhotoFilter) (string, []interface{}) {
+	var whereClauses []string
+	var args []interface{}
+
+	// 1. Text search on original_filename or relative_path (case-insensitive substring)
+	q := strings.TrimSpace(filter.Query)
+	if q != "" {
+		escaped := "%" + escapeLike(q) + "%"
+		whereClauses = append(whereClauses, "(original_filename LIKE ? ESCAPE '\\' OR relative_path LIKE ? ESCAPE '\\')")
+		args = append(args, escaped, escaped)
+	}
+
+	// 2. Date range filtering on verified capture date (taken_at)
+	if filter.StartDate != nil {
+		whereClauses = append(whereClauses, "taken_at IS NOT NULL AND taken_at >= ?")
+		args = append(args, filter.StartDate.UTC())
+	}
+	if filter.EndDate != nil {
+		whereClauses = append(whereClauses, "taken_at IS NOT NULL AND taken_at <= ?")
+		args = append(args, filter.EndDate.UTC())
+	}
+
+	// 3. Undated photos filtering
+	if filter.IsUndated != nil {
+		if *filter.IsUndated {
+			whereClauses = append(whereClauses, "taken_at IS NULL")
+		} else {
+			whereClauses = append(whereClauses, "taken_at IS NOT NULL")
+		}
+	}
+
+	// 4. Physical folder filtering
+	folder := cleanFolderPath(filter.Folder)
+	if folder != "" {
+		prefix := folder + "/"
+		if filter.Recursive {
+			whereClauses = append(whereClauses, "(relative_path = ? OR SUBSTR(relative_path, 1, ?) = ?)")
+			args = append(args, folder, len(prefix), prefix)
+		} else {
+			whereClauses = append(whereClauses, "SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0")
+			args = append(args, len(prefix), prefix, len(prefix)+1)
+		}
+	} else if strings.TrimSpace(filter.Folder) == "/" || strings.TrimSpace(filter.Folder) == "." {
+		if !filter.Recursive {
+			whereClauses = append(whereClauses, "INSTR(relative_path, '/') = 0")
+		}
+	}
+
+	// 5. Virtual album filtering
+	albumID := strings.TrimSpace(filter.AlbumID)
+	if albumID != "" {
+		whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM photo_albums pa WHERE pa.photo_id = photos.id AND pa.album_id = ?)")
+		args = append(args, albumID)
+	}
+
+	// 6. Media type filtering
+	mediaType := strings.TrimSpace(filter.MediaType)
+	if mediaType != "" {
+		if strings.HasSuffix(mediaType, "/*") {
+			prefix := strings.TrimSuffix(mediaType, "/*") + "/"
+			whereClauses = append(whereClauses, "SUBSTR(media_type, 1, ?) = ?")
+			args = append(args, len(prefix), prefix)
+		} else {
+			whereClauses = append(whereClauses, "media_type = ?")
+			args = append(args, mediaType)
+		}
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	return whereSQL, args
+}
+
+func buildPhotoOrderBy(sortBy, sortOrder string) string {
+	dir := "DESC"
+	if strings.ToLower(sortOrder) == "asc" {
+		dir = "ASC"
+	}
+
+	switch strings.ToLower(sortBy) {
+	case "date", "taken_at":
+		return fmt.Sprintf("(CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at %s, file_modified_at %s, id ASC", dir, dir)
+	case "modified", "file_modified_at":
+		return fmt.Sprintf("file_modified_at %s, id ASC", dir)
+	case "filename", "name", "title":
+		return fmt.Sprintf("original_filename COLLATE NOCASE %s, id ASC", dir)
+	case "size", "file_size":
+		return fmt.Sprintf("file_size %s, id ASC", dir)
+	case "created", "created_at":
+		return fmt.Sprintf("created_at %s, id ASC", dir)
+	default:
+		return fmt.Sprintf("(CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at %s, file_modified_at %s, id ASC", dir, dir)
+	}
 }
 
 // Create inserts a new photo record.
@@ -172,54 +295,52 @@ WHERE relative_path = ?`
 
 // List returns a paginated list of photos with deterministic ordering.
 func (r *SQLitePhotoRepository) List(ctx context.Context, offset, limit int, sortBy, order string) ([]models.Photo, int, error) {
+	return r.SearchAndFilter(ctx, PhotoFilter{
+		Offset:    offset,
+		Limit:     limit,
+		SortBy:    sortBy,
+		SortOrder: order,
+	})
+}
+
+// SearchAndFilter returns a paginated slice of photos matching the given filter criteria, along with total count.
+func (r *SQLitePhotoRepository) SearchAndFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 200 {
 		limit = 200
 	}
+	offset := filter.Offset
 	if offset < 0 {
 		offset = 0
 	}
 
-	// Map sort options safely
-	var orderByClause string
-	dir := "DESC"
-	if strings.ToLower(order) == "asc" {
-		dir = "ASC"
-	}
+	whereSQL, args := buildPhotoFilterConditions(filter)
 
-	switch sortBy {
-	case "date":
-		// Prefer taken_at, fallback to file_modified_at then created_at
-		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
-	case "modified":
-		orderByClause = fmt.Sprintf("file_modified_at %s, id ASC", dir)
-	case "filename":
-		orderByClause = fmt.Sprintf("original_filename %s, id ASC", dir)
-	case "size":
-		orderByClause = fmt.Sprintf("file_size %s, id ASC", dir)
-	case "created":
-		orderByClause = fmt.Sprintf("created_at %s, id ASC", dir)
-	default:
-		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
-	}
-
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM photos %s", whereSQL)
 	var total int
-	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM photos").Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("failed to count photos: %w", err)
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count filtered photos: %w", err)
 	}
 
-	query := fmt.Sprintf(`
+	orderBy := buildPhotoOrderBy(filter.SortBy, filter.SortOrder)
+	dataQuery := fmt.Sprintf(`
 SELECT id, relative_path, original_filename, media_type, file_size,
        width, height, taken_at, file_modified_at, created_at, updated_at
 FROM photos
+%s
 ORDER BY %s
-LIMIT ? OFFSET ?`, orderByClause)
+LIMIT ? OFFSET ?`, whereSQL, orderBy)
 
-	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	queryArgs := make([]interface{}, len(args), len(args)+2)
+	copy(queryArgs, args)
+	queryArgs = append(queryArgs, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, dataQuery, queryArgs...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to query photos: %w", err)
+		return nil, 0, fmt.Errorf("failed to query filtered photos: %w", err)
 	}
 	defer rows.Close()
 
@@ -230,12 +351,12 @@ LIMIT ? OFFSET ?`, orderByClause)
 			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
 			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
-			return nil, 0, fmt.Errorf("failed to scan photo: %w", err)
+			return nil, 0, fmt.Errorf("failed to scan filtered photo: %w", err)
 		}
 		photos = append(photos, p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("error during photos iteration: %w", err)
+		return nil, 0, fmt.Errorf("error during filtered photos iteration: %w", err)
 	}
 
 	return photos, total, nil
@@ -281,26 +402,7 @@ func (r *SQLitePhotoRepository) ListByFolder(ctx context.Context, folderPath str
 		return nil, 0, fmt.Errorf("failed to count photos in folder %q: %w", normPath, err)
 	}
 
-	var orderByClause string
-	dir := "DESC"
-	if strings.ToLower(order) == "asc" {
-		dir = "ASC"
-	}
-
-	switch sortBy {
-	case "date":
-		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
-	case "modified":
-		orderByClause = fmt.Sprintf("file_modified_at %s, id ASC", dir)
-	case "filename":
-		orderByClause = fmt.Sprintf("original_filename %s, id ASC", dir)
-	case "size":
-		orderByClause = fmt.Sprintf("file_size %s, id ASC", dir)
-	case "created":
-		orderByClause = fmt.Sprintf("created_at %s, id ASC", dir)
-	default:
-		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
-	}
+	orderByClause := buildPhotoOrderBy(sortBy, order)
 
 	query := fmt.Sprintf(`
 SELECT id, relative_path, original_filename, media_type, file_size,
@@ -381,7 +483,7 @@ func (r *SQLitePhotoRepository) GetFolderCoverPhoto(ctx context.Context, folderP
 SELECT id, relative_path, original_filename, media_type, file_size,
        width, height, taken_at, file_modified_at, created_at, updated_at
 FROM photos
-ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC
+ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC
 LIMIT 1`
 	} else {
 		prefix := normPath + "/"
@@ -390,7 +492,7 @@ SELECT id, relative_path, original_filename, media_type, file_size,
        width, height, taken_at, file_modified_at, created_at, updated_at
 FROM photos
 WHERE SUBSTR(relative_path, 1, ?) = ?
-ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC
+ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC
 LIMIT 1`
 		args = append(args, len(prefix), prefix)
 	}
@@ -415,32 +517,50 @@ LIMIT 1`
 // 2. Photos without capture dates (taken_at IS NULL) sorted by file_modified_at descending as fallback
 // Consistent deterministic sorting is ensured via tie-breaker (id ASC).
 func (r *SQLitePhotoRepository) ListTimeline(ctx context.Context, offset, limit int) ([]models.Photo, int, error) {
+	return r.ListTimelineWithFilter(ctx, PhotoFilter{
+		Offset: offset,
+		Limit:  limit,
+	})
+}
+
+// ListTimelineWithFilter returns chronologically ordered photos matching filter criteria.
+func (r *SQLitePhotoRepository) ListTimelineWithFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 200 {
 		limit = 200
 	}
+	offset := filter.Offset
 	if offset < 0 {
 		offset = 0
 	}
 
+	whereSQL, args := buildPhotoFilterConditions(filter)
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM photos %s", whereSQL)
 	var total int
-	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM photos").Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("failed to count photos for timeline: %w", err)
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count timeline photos: %w", err)
 	}
 
-	query := `
+	query := fmt.Sprintf(`
 SELECT id, relative_path, original_filename, media_type, file_size,
        width, height, taken_at, file_modified_at, created_at, updated_at
 FROM photos
+%s
 ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC,
          taken_at DESC,
          file_modified_at DESC,
          id ASC
-LIMIT ? OFFSET ?`
+LIMIT ? OFFSET ?`, whereSQL)
 
-	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	queryArgs := make([]interface{}, len(args), len(args)+2)
+	copy(queryArgs, args)
+	queryArgs = append(queryArgs, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query timeline photos: %w", err)
 	}
@@ -490,8 +610,8 @@ SELECT prev_id, next_id FROM ordered WHERE id = ?`
 			query = `
 WITH ordered AS (
     SELECT id,
-           LAG(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS prev_id,
-           LEAD(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS next_id
+           LAG(id) OVER (ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC) AS prev_id,
+           LEAD(id) OVER (ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC) AS next_id
     FROM photos
     WHERE INSTR(relative_path, '/') = 0
 )
@@ -502,8 +622,8 @@ SELECT prev_id, next_id FROM ordered WHERE id = ?`
 			query = `
 WITH ordered AS (
     SELECT id,
-           LAG(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS prev_id,
-           LEAD(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS next_id
+           LAG(id) OVER (ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC) AS prev_id,
+           LEAD(id) OVER (ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC) AS next_id
     FROM photos
     WHERE SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0
 )

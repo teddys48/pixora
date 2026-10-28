@@ -1,26 +1,26 @@
-import { useMemo } from 'react'
-import { Photo } from '@/types/photo'
+import { useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { Photo, PhotoSortOption } from '@/types/photo'
 import { PhotoCard } from '@/components/gallery/PhotoCard'
 import { GalleryControls } from '@/components/gallery/GalleryControls'
 import { EmptyState } from '@/components/gallery/EmptyState'
 import { LoadingState } from '@/components/gallery/LoadingState'
 import { Button } from '@/components/ui/Button'
 import { usePhotos } from '@/context/PhotosContext'
-import { AlertCircle, RefreshCw, CheckCircle2, FolderOpen } from 'lucide-react'
+import { AlertCircle, RefreshCw, CheckCircle2 } from 'lucide-react'
 
 interface PhotosPageProps {
   onSelectPhoto: (photo: Photo, photosList: Photo[]) => void
   onUploadClick: () => void
-  folderFilter?: string | null
-  onClearFolderFilter?: () => void
 }
 
 export function PhotosPage({
   onSelectPhoto,
   onUploadClick,
-  folderFilter,
-  onClearFolderFilter,
 }: PhotosPageProps) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const isInitializedRef = useRef(false)
+
   const {
     photos,
     totalPhotos,
@@ -33,6 +33,22 @@ export function PhotosPage({
     setViewMode,
     searchQuery,
     setSearchQuery,
+    startDate,
+    setStartDate,
+    endDate,
+    setEndDate,
+    folderFilter,
+    setFolderFilter,
+    albumFilter,
+    setAlbumFilter,
+    mediaTypeFilter,
+    setMediaTypeFilter,
+    undatedOnly,
+    setUndatedOnly,
+    hasActiveFilters,
+    activeFiltersCount,
+    clearFilters,
+    resetAll,
     isScanning,
     scanResult,
     setScanResult,
@@ -41,26 +57,83 @@ export function PhotosPage({
     handleScan,
   } = usePhotos()
 
-  // Filter photos client-side for search and folder
-  const filteredPhotos = useMemo(() => {
-    let result = [...photos]
+  // 1. Initial mount: read URL search parameters into state
+  useEffect(() => {
+    if (isInitializedRef.current) return
+    isInitializedRef.current = true
 
-    if (folderFilter) {
-      result = result.filter((p) => p.folderId === folderFilter)
+    const q = searchParams.get('q')
+    const start = searchParams.get('startDate')
+    const end = searchParams.get('endDate')
+    const folder = searchParams.get('folder')
+    const album = searchParams.get('albumId')
+    const media = searchParams.get('mediaType')
+    const undated = searchParams.get('undated')
+    const sort = searchParams.get('sort') as PhotoSortOption | null
+
+    if (q) setSearchQuery(q)
+    if (start) setStartDate(start)
+    if (end) setEndDate(end)
+    if (folder) setFolderFilter(folder)
+    if (album) setAlbumFilter(album)
+    if (media) setMediaTypeFilter(media)
+    if (undated === 'true') setUndatedOnly(true)
+    if (
+      sort &&
+      [
+        'date-desc',
+        'date-asc',
+        'title-asc',
+        'title-desc',
+        'size-desc',
+        'size-asc',
+        'modified-desc',
+        'modified-asc',
+      ].includes(sort)
+    ) {
+      setSortOption(sort)
     }
+  }, [
+    searchParams,
+    setSearchQuery,
+    setStartDate,
+    setEndDate,
+    setFolderFilter,
+    setAlbumFilter,
+    setMediaTypeFilter,
+    setUndatedOnly,
+    setSortOption,
+  ])
 
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim()
-      result = result.filter(
-        (p) =>
-          p.title.toLowerCase().includes(q) ||
-          p.filename.toLowerCase().includes(q) ||
-          (p.metadata.camera && p.metadata.camera.toLowerCase().includes(q))
-      )
+  // 2. Synchronize search & discovery filter state back to URL query parameters
+  useEffect(() => {
+    if (!isInitializedRef.current) return
+
+    const params = new URLSearchParams()
+    if (searchQuery.trim()) params.set('q', searchQuery.trim())
+    if (startDate) params.set('startDate', startDate)
+    if (endDate) params.set('endDate', endDate)
+    if (folderFilter) params.set('folder', folderFilter)
+    if (albumFilter) params.set('albumId', albumFilter)
+    if (mediaTypeFilter) params.set('mediaType', mediaTypeFilter)
+    if (undatedOnly) params.set('undated', 'true')
+    if (sortOption !== 'date-desc') params.set('sort', sortOption)
+
+    if (params.toString() !== searchParams.toString()) {
+      setSearchParams(params, { replace: true })
     }
-
-    return result
-  }, [photos, folderFilter, searchQuery])
+  }, [
+    searchQuery,
+    startDate,
+    endDate,
+    folderFilter,
+    albumFilter,
+    mediaTypeFilter,
+    undatedOnly,
+    sortOption,
+    searchParams,
+    setSearchParams,
+  ])
 
   return (
     <div className="space-y-6">
@@ -68,21 +141,21 @@ export function PhotosPage({
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            {folderFilter ? 'Folder Photos' : 'All Photos'}
+            {hasActiveFilters ? 'Filtered Photos' : 'All Photos'}
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {folderFilter
-              ? 'Photos inside the selected album.'
+            {hasActiveFilters
+              ? 'Photos matching your active search and discovery criteria.'
               : 'Browse, search, and curate your photographic collection.'}
           </p>
         </div>
 
-        {folderFilter && onClearFolderFilter && (
+        {hasActiveFilters && (
           <button
-            onClick={onClearFolderFilter}
+            onClick={resetAll}
             className="text-xs text-primary hover:underline font-medium self-start sm:self-auto"
           >
-            &larr; View all photos
+            &larr; Reset all filters
           </button>
         )}
       </div>
@@ -134,34 +207,35 @@ export function PhotosPage({
         onSortChange={setSortOption}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
-        totalCount={folderFilter ? filteredPhotos.length : totalPhotos}
+        totalCount={totalPhotos}
         onScanClick={handleScan}
         isScanning={isScanning}
+        startDate={startDate}
+        onStartDateChange={setStartDate}
+        endDate={endDate}
+        onEndDateChange={setEndDate}
+        folderFilter={folderFilter}
+        onFolderFilterChange={setFolderFilter}
+        albumFilter={albumFilter}
+        onAlbumFilterChange={setAlbumFilter}
+        mediaTypeFilter={mediaTypeFilter}
+        onMediaTypeFilterChange={setMediaTypeFilter}
+        undatedOnly={undatedOnly}
+        onUndatedOnlyChange={setUndatedOnly}
+        hasActiveFilters={hasActiveFilters}
+        activeFiltersCount={activeFiltersCount}
+        onClearFilters={clearFilters}
+        onResetAll={resetAll}
       />
 
       {/* Gallery Content Area */}
       {isLoading ? (
         <LoadingState viewMode={viewMode} />
-      ) : folderFilter && filteredPhotos.length === 0 ? (
-        <div className="flex flex-col items-center justify-center p-14 text-center border border-dashed border-border rounded-2xl bg-card/40 my-8">
-          <div className="flex items-center justify-center w-14 h-14 rounded-full bg-primary/10 text-primary mb-4">
-            <FolderOpen className="w-7 h-7 stroke-[1.5]" />
-          </div>
-          <h3 className="text-lg font-semibold text-foreground mb-1">No photos in this album</h3>
-          <p className="text-sm text-muted-foreground max-w-md mb-5 leading-relaxed">
-            This album has no assigned photos yet. Full album organization and assigning photos to albums is planned for Phase 4.
-          </p>
-          {onClearFolderFilter && (
-            <Button onClick={onClearFolderFilter} size="md">
-              View all photos
-            </Button>
-          )}
-        </div>
-      ) : filteredPhotos.length === 0 ? (
+      ) : photos.length === 0 ? (
         <EmptyState
-          isSearch={Boolean(searchQuery.trim())}
+          isSearch={hasActiveFilters || Boolean(searchQuery.trim())}
           searchQuery={searchQuery}
-          onReset={() => setSearchQuery('')}
+          onReset={resetAll}
           onUploadClick={onUploadClick}
           onScanClick={handleScan}
           isScanning={isScanning}
@@ -169,17 +243,17 @@ export function PhotosPage({
       ) : viewMode === 'grid' ? (
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6">
-            {filteredPhotos.map((photo) => (
+            {photos.map((photo) => (
               <PhotoCard
                 key={photo.id}
                 photo={photo}
-                onSelect={(p) => onSelectPhoto(p, filteredPhotos)}
+                onSelect={(p) => onSelectPhoto(p, photos)}
                 viewMode="grid"
               />
             ))}
           </div>
 
-          {!folderFilter && photos.length < totalPhotos && (
+          {photos.length < totalPhotos && (
             <div className="flex justify-center pt-6 pb-2">
               <Button
                 variant="outline"
@@ -201,17 +275,17 @@ export function PhotosPage({
       ) : (
         <>
           <div className="space-y-2.5">
-            {filteredPhotos.map((photo) => (
+            {photos.map((photo) => (
               <PhotoCard
                 key={photo.id}
                 photo={photo}
-                onSelect={(p) => onSelectPhoto(p, filteredPhotos)}
+                onSelect={(p) => onSelectPhoto(p, photos)}
                 viewMode="list"
               />
             ))}
           </div>
 
-          {!folderFilter && photos.length < totalPhotos && (
+          {photos.length < totalPhotos && (
             <div className="flex justify-center pt-6 pb-2">
               <Button
                 variant="outline"

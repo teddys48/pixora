@@ -36,7 +36,7 @@ export function PhotoCard({
   const displayDate = isCaptureDate
     ? formatDate(photo.takenAt)
     : hasFallbackDate
-    ? formatDate(photo.fileModifiedAt)
+    ? `Mod: ${formatDate(photo.fileModifiedAt)}`
     : 'Undated'
 
   if (viewMode === 'list') {
@@ -64,7 +64,12 @@ export function PhotoCard({
             </h3>
             <p className="text-xs text-muted-foreground truncate mt-0.5">{photo.filename}</p>
             <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-              <span title={dateTitle}>{displayDate}</span>
+              <span
+                title={dateTitle}
+                className={hasFallbackDate ? 'italic text-muted-foreground/90' : undefined}
+              >
+                {displayDate}
+              </span>
               {photo.metadata.camera && (
                 <span className="hidden sm:flex items-center gap-1 truncate">
                   <Camera className="w-3 h-3" />
@@ -169,7 +174,12 @@ export function PhotoCard({
         </div>
 
         <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-3 pt-2.5 border-t border-border/50">
-          <span title={dateTitle}>{displayDate}</span>
+          <span
+            title={dateTitle}
+            className={hasFallbackDate ? 'italic text-muted-foreground/90' : undefined}
+          >
+            {displayDate}
+          </span>
           {photo.metadata.camera ? (
             <span className="truncate max-w-[120px] opacity-80" title={photo.metadata.camera}>
               {photo.metadata.camera.replace('Sony ', '').replace('Fujifilm ', '').replace('Canon EOS ', '')}

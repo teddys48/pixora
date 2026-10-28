@@ -847,3 +847,284 @@ func TestPhase5TimelineAndViewerLifecycle(t *testing.T) {
 		}
 	}
 }
+
+func TestPhase6SearchFilterSortLifecycle(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_phase6_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mediaDir := filepath.Join(tempDir, "media")
+	dbPath := filepath.Join(tempDir, "data", "pixora.db")
+	_ = os.MkdirAll(mediaDir, 0755)
+	_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
+
+	// Create folder hierarchy with photos:
+	// Pictures/Vacation/beach.jpg
+	// Pictures/Vacation/sunset.jpg
+	// Documents/scan_100%_pure.png
+	vacationDir := filepath.Join(mediaDir, "Pictures", "Vacation")
+	docsDir := filepath.Join(mediaDir, "Documents")
+	_ = os.MkdirAll(vacationDir, 0755)
+	_ = os.MkdirAll(docsDir, 0755)
+
+	beachPath := filepath.Join(vacationDir, "beach.jpg")
+	sunsetPath := filepath.Join(vacationDir, "sunset.jpg")
+	scanPath := filepath.Join(docsDir, "scan_100%_pure.png")
+
+	_ = os.WriteFile(beachPath, createTestJPEG(640, 480), 0644)
+	_ = os.WriteFile(sunsetPath, createTestJPEG(800, 600), 0644)
+	_ = os.WriteFile(scanPath, createTestPNG(300, 300), 0644)
+
+	cfg := &config.Config{
+		Port:         "8080",
+		Host:         "127.0.0.1",
+		Env:          "testing",
+		StorageRoot:  mediaDir,
+		DatabasePath: dbPath,
+	}
+
+	store, err := storage.New(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("Failed to init storage: %v", err)
+	}
+
+	db, err := database.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatalf("Failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	albumRepo := repository.NewSQLiteAlbumRepository(db)
+	thumbSvc := media.NewThumbnailService(store)
+	mediaScanner := scanner.New(store, photoRepo)
+
+	app := server.NewWithDependencies(server.Dependencies{
+		Config:    cfg,
+		DB:        db,
+		Storage:   store,
+		PhotoRepo: photoRepo,
+		AlbumRepo: albumRepo,
+		Thumbnail: thumbSvc,
+		Scanner:   mediaScanner,
+	})
+
+	// 1. Initial scan
+	reqScan := httptest.NewRequest("POST", "/api/photos/scan?sync=true", nil)
+	respScan, err := app.Test(reqScan, -1)
+	if err != nil || respScan.StatusCode != fiber.StatusOK {
+		t.Fatalf("Scan failed: %v, status %d", err, respScan.StatusCode)
+	}
+
+	// Retrieve photos and update capture dates
+	photos, _, err := photoRepo.List(t.Context(), 0, 10, "filename", "asc")
+	if err != nil || len(photos) != 3 {
+		t.Fatalf("Expected 3 indexed photos, got %d (err: %v)", len(photos), err)
+	}
+
+	var pBeach, pSunset, pScan models.Photo
+	for _, p := range photos {
+		if strings.Contains(p.OriginalFilename, "beach") {
+			pBeach = p
+		} else if strings.Contains(p.OriginalFilename, "sunset") {
+			pSunset = p
+		} else if strings.Contains(p.OriginalFilename, "scan") {
+			pScan = p
+		}
+	}
+
+	tBeach := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	tSunset := time.Date(2026, 6, 18, 18, 30, 0, 0, time.UTC)
+	pBeach.TakenAt = &tBeach
+	pSunset.TakenAt = &tSunset
+	_ = photoRepo.Update(t.Context(), &pBeach)
+	_ = photoRepo.Update(t.Context(), &pSunset)
+	// pScan remains undated (TakenAt = nil)
+
+	// Create virtual album and associate beach photo
+	album := &models.Album{
+		ID:          "alb-summer-picks",
+		Name:        "Summer Picks",
+		Description: "Best summer photos",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = albumRepo.Create(t.Context(), album)
+	_, _ = albumRepo.AddPhotos(t.Context(), album.ID, []string{pBeach.ID})
+
+	// 2. Search by filename: exact & substring case-insensitive
+	reqSearch := httptest.NewRequest("GET", "/api/photos?q=beach", nil)
+	respSearch, _ := app.Test(reqSearch, -1)
+	var sr1 struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodySearch, _ := io.ReadAll(respSearch.Body)
+	_ = json.Unmarshal(bodySearch, &sr1)
+	if sr1.Total != 1 || sr1.Photos[0].ID != pBeach.ID {
+		t.Errorf("Search q=beach failed: total=%d, photos=%+v", sr1.Total, sr1.Photos)
+	}
+
+	// Case-insensitive search: SUNSET
+	reqCase := httptest.NewRequest("GET", "/api/photos?q=SUNSET", nil)
+	respCase, _ := app.Test(reqCase, -1)
+	var srCase struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodyCase, _ := io.ReadAll(respCase.Body)
+	_ = json.Unmarshal(bodyCase, &srCase)
+	if srCase.Total != 1 || srCase.Photos[0].ID != pSunset.ID {
+		t.Errorf("Case-insensitive search q=SUNSET failed: total=%d", srCase.Total)
+	}
+
+	// Literal wildcard % search
+	reqWild := httptest.NewRequest("GET", "/api/photos?q=100%25", nil)
+	respWild, _ := app.Test(reqWild, -1)
+	var srWild struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodyWild, _ := io.ReadAll(respWild.Body)
+	_ = json.Unmarshal(bodyWild, &srWild)
+	if srWild.Total != 1 || srWild.Photos[0].ID != pScan.ID {
+		t.Errorf("Wildcard search q=100%% failed: total=%d", srWild.Total)
+	}
+
+	// 3. Date range filter
+	reqDateRange := httptest.NewRequest("GET", "/api/photos?startDate=2026-06-01&endDate=2026-06-30", nil)
+	respDateRange, _ := app.Test(reqDateRange, -1)
+	var srDate struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodyDate, _ := io.ReadAll(respDateRange.Body)
+	_ = json.Unmarshal(bodyDate, &srDate)
+	if srDate.Total != 2 {
+		t.Errorf("Expected 2 dated photos in June 2026, got %d", srDate.Total)
+	}
+
+	// Sub-range: only sunset
+	reqDateSub := httptest.NewRequest("GET", "/api/photos?startDate=2026-06-16&endDate=2026-06-30", nil)
+	respDateSub, _ := app.Test(reqDateSub, -1)
+	var srDateSub struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodySub, _ := io.ReadAll(respDateSub.Body)
+	_ = json.Unmarshal(bodySub, &srDateSub)
+	if srDateSub.Total != 1 || srDateSub.Photos[0].ID != pSunset.ID {
+		t.Errorf("Expected sunset for date range June 16-30, got %d", srDateSub.Total)
+	}
+
+	// Validation error: startDate after endDate
+	reqBadDate := httptest.NewRequest("GET", "/api/photos?startDate=2026-07-01&endDate=2026-06-01", nil)
+	respBadDate, _ := app.Test(reqBadDate, -1)
+	if respBadDate.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for startDate > endDate, got %d", respBadDate.StatusCode)
+	}
+
+	// 4. Physical folder filter
+	reqFolder := httptest.NewRequest("GET", "/api/photos?folder=Pictures/Vacation", nil)
+	respFolder, _ := app.Test(reqFolder, -1)
+	var srFolder struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodyFolder, _ := io.ReadAll(respFolder.Body)
+	_ = json.Unmarshal(bodyFolder, &srFolder)
+	if srFolder.Total != 2 {
+		t.Errorf("Expected 2 photos in Pictures/Vacation, got %d", srFolder.Total)
+	}
+
+	// Path traversal in folder filter returns 400
+	reqBadFolder := httptest.NewRequest("GET", "/api/photos?folder=../escape", nil)
+	respBadFolder, _ := app.Test(reqBadFolder, -1)
+	if respBadFolder.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for path traversal, got %d", respBadFolder.StatusCode)
+	}
+
+	// 5. Virtual album filter
+	reqAlb := httptest.NewRequest("GET", "/api/photos?albumId="+album.ID, nil)
+	respAlb, _ := app.Test(reqAlb, -1)
+	var srAlb struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodyAlb, _ := io.ReadAll(respAlb.Body)
+	_ = json.Unmarshal(bodyAlb, &srAlb)
+	if srAlb.Total != 1 || srAlb.Photos[0].ID != pBeach.ID {
+		t.Errorf("Expected 1 photo pBeach in album, got %d", srAlb.Total)
+	}
+
+	// 6. Media type filter
+	reqPNG := httptest.NewRequest("GET", "/api/photos?mediaType=image/png", nil)
+	respPNG, _ := app.Test(reqPNG, -1)
+	var srPNG struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bodyPNG, _ := io.ReadAll(respPNG.Body)
+	_ = json.Unmarshal(bodyPNG, &srPNG)
+	if srPNG.Total != 1 || srPNG.Photos[0].ID != pScan.ID {
+		t.Errorf("Expected pScan for mediaType=image/png, got %d", srPNG.Total)
+	}
+
+	// 7. Sorting: date desc (newest sunset -> beach -> scan)
+	reqSortDateDesc := httptest.NewRequest("GET", "/api/photos?sort=date&order=desc", nil)
+	respSortDateDesc, _ := app.Test(reqSortDateDesc, -1)
+	var srSortDateDesc struct {
+		Photos []api.PhotoResponse `json:"photos"`
+	}
+	bodySort1, _ := io.ReadAll(respSortDateDesc.Body)
+	_ = json.Unmarshal(bodySort1, &srSortDateDesc)
+	if srSortDateDesc.Photos[0].ID != pSunset.ID || srSortDateDesc.Photos[1].ID != pBeach.ID || srSortDateDesc.Photos[2].ID != pScan.ID {
+		t.Errorf("Unexpected sort date desc: %+v", srSortDateDesc.Photos)
+	}
+
+	// Sorting: date asc (oldest beach -> sunset -> scan)
+	reqSortDateAsc := httptest.NewRequest("GET", "/api/photos?sort=date&order=asc", nil)
+	respSortDateAsc, _ := app.Test(reqSortDateAsc, -1)
+	var srSortDateAsc struct {
+		Photos []api.PhotoResponse `json:"photos"`
+	}
+	bodySort2, _ := io.ReadAll(respSortDateAsc.Body)
+	_ = json.Unmarshal(bodySort2, &srSortDateAsc)
+	if srSortDateAsc.Photos[0].ID != pBeach.ID || srSortDateAsc.Photos[1].ID != pSunset.ID || srSortDateAsc.Photos[2].ID != pScan.ID {
+		t.Errorf("Unexpected sort date asc: %+v", srSortDateAsc.Photos)
+	}
+
+	// 8. Pagination: limit 2 offset 0, then limit 2 offset 2
+	reqP1 := httptest.NewRequest("GET", "/api/photos?limit=2&offset=0&sort=date&order=desc", nil)
+	respP1, _ := app.Test(reqP1, -1)
+	var srP1 struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bP1, _ := io.ReadAll(respP1.Body)
+	_ = json.Unmarshal(bP1, &srP1)
+	if srP1.Total != 3 || len(srP1.Photos) != 2 {
+		t.Errorf("Pagination page 1 unexpected: total=%d, len=%d", srP1.Total, len(srP1.Photos))
+	}
+
+	reqP2 := httptest.NewRequest("GET", "/api/photos?limit=2&offset=2&sort=date&order=desc", nil)
+	respP2, _ := app.Test(reqP2, -1)
+	var srP2 struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	bP2, _ := io.ReadAll(respP2.Body)
+	_ = json.Unmarshal(bP2, &srP2)
+	if srP2.Total != 3 || len(srP2.Photos) != 1 || srP2.Photos[0].ID != pScan.ID {
+		t.Errorf("Pagination page 2 unexpected: total=%d, photos=%+v", srP2.Total, srP2.Photos)
+	}
+
+	// 9. Non-destructive guarantee: all original media files in storage root are intact
+	for _, expectedFile := range []string{beachPath, sunsetPath, scanPath} {
+		if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
+			t.Errorf("Original media file %s was unexpectedly removed or modified", expectedFile)
+		}
+	}
+}

@@ -64,6 +64,16 @@ CREATE INDEX IF NOT EXISTS idx_photo_albums_photo_id ON photo_albums(photo_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_name_nocase ON albums(name COLLATE NOCASE);
 `,
 	},
+	{
+		Version: 3,
+		Name:    "add_search_filter_indexes",
+		SQL: `
+CREATE INDEX IF NOT EXISTS idx_photos_original_filename_nocase ON photos(original_filename COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_photos_media_type ON photos(media_type);
+CREATE INDEX IF NOT EXISTS idx_photos_file_modified_at ON photos(file_modified_at DESC);
+CREATE INDEX IF NOT EXISTS idx_photos_file_size ON photos(file_size);
+`,
+	},
 }
 
 // Migrate applies all unapplied database migrations in transactional batches.

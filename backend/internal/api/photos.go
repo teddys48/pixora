@@ -108,6 +108,147 @@ func decodeCursor(cursor string) (int, error) {
 	return offset, nil
 }
 
+// parseFilterDate parses date query parameters safely into UTC time.
+// Supports RFC3339 and standard YYYY-MM-DD.
+// When isEnd is true, YYYY-MM-DD dates resolve to 23:59:59.999999999 UTC (inclusive end-of-day).
+// When isEnd is false, YYYY-MM-DD dates resolve to 00:00:00 UTC (inclusive start-of-day).
+func parseFilterDate(s string, isEnd bool) (*time.Time, error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	// 1. Try RFC3339 format
+	if t, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		utc := t.UTC()
+		return &utc, nil
+	}
+
+	// 2. Try YYYY-MM-DD date format
+	if t, err := time.Parse("2006-01-02", trimmed); err == nil {
+		if isEnd {
+			endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC)
+			return &endOfDay, nil
+		}
+		startOfDay := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		return &startOfDay, nil
+	}
+
+	// 3. Try ISO-like datetime YYYY-MM-DDTHH:MM:SS
+	if t, err := time.Parse("2006-01-02T15:04:05", trimmed); err == nil {
+		utc := t.UTC()
+		return &utc, nil
+	}
+
+	return nil, fmt.Errorf("invalid date format %q: expected YYYY-MM-DD or RFC3339", trimmed)
+}
+
+func parsePhotoFilterParams(c *fiber.Ctx) (repository.PhotoFilter, error) {
+	q := c.Query("q", c.Query("search", ""))
+
+	// Date filtering
+	startStr := c.Query("startDate", c.Query("start_date", ""))
+	startDate, err := parseFilterDate(startStr, false)
+	if err != nil {
+		return repository.PhotoFilter{}, fmt.Errorf("invalid startDate: %w", err)
+	}
+
+	endStr := c.Query("endDate", c.Query("end_date", ""))
+	endDate, err := parseFilterDate(endStr, true)
+	if err != nil {
+		return repository.PhotoFilter{}, fmt.Errorf("invalid endDate: %w", err)
+	}
+
+	if startDate != nil && endDate != nil && startDate.After(*endDate) {
+		return repository.PhotoFilter{}, errors.New("startDate cannot be after endDate")
+	}
+
+	// Folder filtering with path traversal prevention
+	folder := c.Query("folder", c.Query("folderPath", ""))
+	if folder != "" {
+		cleaned := filepath.Clean(folder)
+		if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "\x00") {
+			return repository.PhotoFilter{}, errors.New("invalid folder: path traversal is not permitted")
+		}
+	}
+
+	// Recursive default is true unless explicitly "false"
+	recursive := true
+	if rStr := c.Query("recursive"); rStr != "" {
+		if r, err := strconv.ParseBool(rStr); err == nil {
+			recursive = r
+		}
+	}
+
+	albumID := c.Query("albumId", c.Query("album_id", ""))
+	mediaType := c.Query("mediaType", c.Query("media_type", ""))
+
+	var isUndated *bool
+	if uStr := c.Query("isUndated", c.Query("undated", "")); uStr != "" {
+		if b, err := strconv.ParseBool(uStr); err == nil {
+			isUndated = &b
+		}
+	}
+
+	// Sorting
+	sortBy := c.Query("sortBy", c.Query("sort", "date"))
+	sortOrder := c.Query("sortOrder", c.Query("order", "desc"))
+
+	allowedSorts := map[string]bool{
+		"date": true, "taken_at": true,
+		"modified": true, "file_modified_at": true,
+		"filename": true, "name": true, "title": true,
+		"size": true, "file_size": true,
+		"created": true, "created_at": true,
+	}
+	if sortBy != "" && !allowedSorts[strings.ToLower(sortBy)] {
+		return repository.PhotoFilter{}, fmt.Errorf("invalid sort option %q; allowed: date, filename, size, modified, created", sortBy)
+	}
+
+	allowedOrders := map[string]bool{
+		"asc": true, "desc": true,
+	}
+	if sortOrder != "" && !allowedOrders[strings.ToLower(sortOrder)] {
+		return repository.PhotoFilter{}, fmt.Errorf("invalid sort order %q; allowed: asc, desc", sortOrder)
+	}
+
+	limit := 50
+	if l := c.Query("limit"); l != "" {
+		parsed, err := strconv.Atoi(l)
+		if err != nil || parsed < 1 {
+			return repository.PhotoFilter{}, errors.New("limit must be a positive integer")
+		}
+		if parsed > 100 {
+			parsed = 100
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if o := c.Query("offset"); o != "" {
+		parsed, err := strconv.Atoi(o)
+		if err != nil || parsed < 0 {
+			return repository.PhotoFilter{}, errors.New("offset must be a non-negative integer")
+		}
+		offset = parsed
+	}
+
+	return repository.PhotoFilter{
+		Query:     q,
+		StartDate: startDate,
+		EndDate:   endDate,
+		Folder:    folder,
+		Recursive: recursive,
+		AlbumID:   albumID,
+		MediaType: mediaType,
+		IsUndated: isUndated,
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
+		Limit:     limit,
+		Offset:    offset,
+	}, nil
+}
+
 // ToPhotoResponse converts a models.Photo into a PhotoResponse with API URLs, normalized folder path, and date source.
 func ToPhotoResponse(p models.Photo) PhotoResponse {
 	folder := filepath.ToSlash(filepath.Dir(p.RelativePath))
@@ -145,38 +286,19 @@ func ToPhotoResponse(p models.Photo) PhotoResponse {
 	}
 }
 
-// ListPhotosHandler handles GET /api/photos with pagination and sorting.
+// ListPhotosHandler handles GET /api/photos with search, filters, pagination, and sorting.
 func ListPhotosHandler(repo repository.PhotoRepository) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil {
 			return SendError(c, fiber.StatusServiceUnavailable, "service_unavailable", "database repository unavailable")
 		}
 
-		limit := 50
-		if l := c.Query("limit"); l != "" {
-			parsed, err := strconv.Atoi(l)
-			if err != nil || parsed < 1 {
-				return SendError(c, fiber.StatusBadRequest, "validation_error", "limit must be a positive integer")
-			}
-			if parsed > 100 {
-				parsed = 100
-			}
-			limit = parsed
+		filter, err := parsePhotoFilterParams(c)
+		if err != nil {
+			return SendError(c, fiber.StatusBadRequest, "validation_error", err.Error())
 		}
 
-		offset := 0
-		if o := c.Query("offset"); o != "" {
-			parsed, err := strconv.Atoi(o)
-			if err != nil || parsed < 0 {
-				return SendError(c, fiber.StatusBadRequest, "validation_error", "offset must be a non-negative integer")
-			}
-			offset = parsed
-		}
-
-		sortBy := c.Query("sort", "date")
-		order := c.Query("order", "desc")
-
-		photos, total, err := repo.List(c.Context(), offset, limit, sortBy, order)
+		photos, total, err := repo.SearchAndFilter(c.Context(), filter)
 		if err != nil {
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list photos")
 		}
@@ -189,17 +311,22 @@ func ListPhotosHandler(repo repository.PhotoRepository) fiber.Handler {
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"photos": responseList,
 			"total":  total,
-			"limit":  limit,
-			"offset": offset,
+			"limit":  filter.Limit,
+			"offset": filter.Offset,
 		})
 	}
 }
 
-// TimelineHandler handles GET /api/timeline with chronological ordering, day grouping, and undated handling.
+// TimelineHandler handles GET /api/timeline with chronological ordering, day grouping, undated handling, and optional discovery filters.
 func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil {
 			return SendError(c, fiber.StatusServiceUnavailable, "service_unavailable", "database repository unavailable")
+		}
+
+		filter, err := parsePhotoFilterParams(c)
+		if err != nil {
+			return SendError(c, fiber.StatusBadRequest, "validation_error", err.Error())
 		}
 
 		limit := 50
@@ -213,6 +340,7 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 			}
 			limit = parsed
 		}
+		filter.Limit = limit
 
 		offset := 0
 		if cursorStr := c.Query("cursor"); cursorStr != "" {
@@ -228,8 +356,9 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 			}
 			offset = parsed
 		}
+		filter.Offset = offset
 
-		photos, total, err := repo.ListTimeline(c.Context(), offset, limit)
+		photos, total, err := repo.ListTimelineWithFilter(c.Context(), filter)
 		if err != nil {
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list timeline photos")
 		}
@@ -627,7 +756,6 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 
 			// Atomically move from tmp to final path
 			if err := os.Rename(tmpFilePath, finalPath); err != nil {
-				// If rename fails (e.g. cross-volume), copy and delete
 				if cpErr := copyFile(tmpFilePath, finalPath); cpErr != nil {
 					_ = os.Remove(tmpFilePath)
 					uploadErrors = append(uploadErrors, FileError{
@@ -669,7 +797,7 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 				continue
 			}
 
-			// Generate thumbnail proactively
+			// Proactively generate thumbnail
 			if thumbSvc != nil {
 				_, _ = thumbSvc.GetOrGenerate(c.Context(), photoModel)
 			}

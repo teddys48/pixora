@@ -67,6 +67,14 @@ export interface FetchPhotosOptions {
   offset?: number
   sort?: string
   order?: string
+  q?: string
+  startDate?: string
+  endDate?: string
+  folder?: string
+  recursive?: boolean
+  albumId?: string
+  mediaType?: string
+  isUndated?: boolean
 }
 
 export async function fetchPhotos(
@@ -78,6 +86,14 @@ export async function fetchPhotos(
   if (options.offset !== undefined) params.set('offset', options.offset.toString())
   if (options.sort) params.set('sort', options.sort)
   if (options.order) params.set('order', options.order)
+  if (options.q) params.set('q', options.q)
+  if (options.startDate) params.set('startDate', options.startDate)
+  if (options.endDate) params.set('endDate', options.endDate)
+  if (options.folder) params.set('folder', options.folder)
+  if (options.recursive !== undefined) params.set('recursive', options.recursive.toString())
+  if (options.albumId) params.set('albumId', options.albumId)
+  if (options.mediaType) params.set('mediaType', options.mediaType)
+  if (options.isUndated !== undefined) params.set('isUndated', options.isUndated.toString())
 
   const url = `${API_BASE_URL}/photos${params.toString() ? `?${params.toString()}` : ''}`
   const response = await fetch(url, {
@@ -106,6 +122,13 @@ export interface FetchTimelineOptions {
   limit?: number
   offset?: number
   cursor?: string
+  q?: string
+  startDate?: string
+  endDate?: string
+  folder?: string
+  albumId?: string
+  mediaType?: string
+  isUndated?: boolean
 }
 
 export interface TimelineData {
@@ -134,6 +157,13 @@ export async function fetchTimeline(
   if (options.limit !== undefined) params.set('limit', options.limit.toString())
   if (options.offset !== undefined) params.set('offset', options.offset.toString())
   if (options.cursor) params.set('cursor', options.cursor)
+  if (options.q) params.set('q', options.q)
+  if (options.startDate) params.set('startDate', options.startDate)
+  if (options.endDate) params.set('endDate', options.endDate)
+  if (options.folder) params.set('folder', options.folder)
+  if (options.albumId) params.set('albumId', options.albumId)
+  if (options.mediaType) params.set('mediaType', options.mediaType)
+  if (options.isUndated !== undefined) params.set('isUndated', options.isUndated.toString())
 
   const url = `${API_BASE_URL}/timeline${params.toString() ? `?${params.toString()}` : ''}`
   const response = await fetch(url, {
@@ -293,9 +323,9 @@ export async function fetchScanStatus(signal?: AbortSignal): Promise<ScanStatus>
   return response.json()
 }
 
-// ==========================================
+// =========================================
 // Virtual Albums API (backed by SQLite)
-// ==========================================
+// =========================================
 
 export interface BackendAlbum {
   id: string

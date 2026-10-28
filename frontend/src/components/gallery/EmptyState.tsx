@@ -26,11 +26,15 @@ export function EmptyState({
         </div>
         <h3 className="text-base font-semibold text-foreground mb-1">No matching photos found</h3>
         <p className="text-sm text-muted-foreground max-w-sm mb-4">
-          No photos matched &ldquo;{searchQuery}&rdquo;. Try searching for different keywords, cameras, or tags.
+          {searchQuery ? (
+            <>No photos matched &ldquo;{searchQuery}&rdquo;. Try adjusting your keywords or clearing active filters.</>
+          ) : (
+            <>No photos matched the active filter criteria. Try adjusting your filter settings or date range.</>
+          )}
         </p>
         {onReset && (
           <Button variant="outline" size="sm" onClick={onReset}>
-            Clear search
+            Reset search &amp; filters
           </Button>
         )}
       </div>

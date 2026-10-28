@@ -114,6 +114,29 @@ export interface UploadResponse {
   message?: string
 }
 
-export type PhotoSortOption = 'date-desc' | 'date-asc' | 'title-asc' | 'title-desc' | 'size-desc'
+export type PhotoSortOption =
+  | 'date-desc'
+  | 'date-asc'
+  | 'title-asc'
+  | 'title-desc'
+  | 'size-desc'
+  | 'size-asc'
+  | 'modified-desc'
+  | 'modified-asc'
 
 export type PhotoViewMode = 'grid' | 'list'
+
+export interface PhotoFilterOptions {
+  q?: string
+  startDate?: string
+  endDate?: string
+  folder?: string
+  recursive?: boolean
+  albumId?: string
+  mediaType?: string
+  isUndated?: boolean
+  sort?: string
+  order?: string
+  limit?: number
+  offset?: number
+}

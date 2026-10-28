@@ -772,3 +772,193 @@ func TestTimelineAndPhotoViewerAPI(t *testing.T) {
 		t.Errorf("Expected relative folder 'originals', got %q", pAdj.Folder)
 	}
 }
+
+func TestPhotoSearchAndFilteringAPI(t *testing.T) {
+	app, db, _, _, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	albumRepo := repository.NewSQLiteAlbumRepository(db)
+	ctx := t.Context()
+
+	d1 := time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC)
+	m3 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	_ = photoRepo.Create(ctx, &models.Photo{
+		ID:               "p-alps",
+		RelativePath:     "Nature/Alps_Peak.jpg",
+		OriginalFilename: "Alps_Peak.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         250000,
+		TakenAt:          &d1,
+		FileModifiedAt:   d1,
+	})
+	_ = photoRepo.Create(ctx, &models.Photo{
+		ID:               "p-lake",
+		RelativePath:     "Nature/Blue_Lake.png",
+		OriginalFilename: "Blue_Lake.png",
+		MediaType:        "image/png",
+		FileSize:         450000,
+		TakenAt:          &d2,
+		FileModifiedAt:   d2,
+	})
+	_ = photoRepo.Create(ctx, &models.Photo{
+		ID:               "p-scan",
+		RelativePath:     "Scans/Invoice_100%.jpg",
+		OriginalFilename: "Invoice_100%.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         80000,
+		TakenAt:          nil,
+		FileModifiedAt:   m3,
+	})
+
+	album := &models.Album{
+		ID:          "alb-mountains",
+		Name:        "Mountain Trip",
+		Description: "Photos of Alps",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	_ = albumRepo.Create(ctx, album)
+	_, _ = albumRepo.AddPhotos(ctx, album.ID, []string{"p-alps"})
+
+	// 1. Search by filename: GET /api/photos?q=alps
+	req := httptest.NewRequest("GET", "/api/photos?q=alps", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil || resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Search failed: %v, status %d", err, resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var searchResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &searchResp)
+	if searchResp.Total != 1 || searchResp.Photos[0].ID != "p-alps" {
+		t.Errorf("Expected 1 result p-alps for q=alps, got total=%d", searchResp.Total)
+	}
+
+	// 2. Search with wildcard characters: GET /api/photos?q=100%
+	req = httptest.NewRequest("GET", "/api/photos?q=100%25", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var wildResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &wildResp)
+	if wildResp.Total != 1 || wildResp.Photos[0].ID != "p-scan" {
+		t.Errorf("Expected p-scan for wildcard search, got total=%d", wildResp.Total)
+	}
+
+	// 3. Date range filter: GET /api/photos?startDate=2026-03-01&endDate=2026-03-31
+	req = httptest.NewRequest("GET", "/api/photos?startDate=2026-03-01&endDate=2026-03-31", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var dateResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &dateResp)
+	if dateResp.Total != 1 || dateResp.Photos[0].ID != "p-alps" {
+		t.Errorf("Expected 1 photo p-alps in March 2026, got %d", dateResp.Total)
+	}
+
+	// 4. Validation error: startDate after endDate
+	req = httptest.NewRequest("GET", "/api/photos?startDate=2026-05-01&endDate=2026-04-01", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for startDate > endDate, got %d", resp.StatusCode)
+	}
+
+	// 5. Validation error: invalid date format
+	req = httptest.NewRequest("GET", "/api/photos?startDate=invalid-date", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for invalid date format, got %d", resp.StatusCode)
+	}
+
+	// 6. Validation error: path traversal in folder
+	req = httptest.NewRequest("GET", "/api/photos?folder=../escape", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for path traversal folder, got %d", resp.StatusCode)
+	}
+
+	// 7. Validation error: invalid sort option
+	req = httptest.NewRequest("GET", "/api/photos?sort=malicious_col", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for invalid sort option, got %d", resp.StatusCode)
+	}
+
+	// 8. Validation error: invalid sort order
+	req = httptest.NewRequest("GET", "/api/photos?order=sideways", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for invalid sort order, got %d", resp.StatusCode)
+	}
+
+	// 9. Media type filter: GET /api/photos?mediaType=image/png
+	req = httptest.NewRequest("GET", "/api/photos?mediaType=image/png", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var mtResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &mtResp)
+	if mtResp.Total != 1 || mtResp.Photos[0].ID != "p-lake" {
+		t.Errorf("Expected p-lake for mediaType=image/png, got total=%d", mtResp.Total)
+	}
+
+	// 10. Album filter: GET /api/photos?albumId=alb-mountains
+	req = httptest.NewRequest("GET", "/api/photos?albumId=alb-mountains", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var albResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &albResp)
+	if albResp.Total != 1 || albResp.Photos[0].ID != "p-alps" {
+		t.Errorf("Expected p-alps for albumId=alb-mountains, got total=%d", albResp.Total)
+	}
+
+	// 11. Undated filter: GET /api/photos?isUndated=true
+	req = httptest.NewRequest("GET", "/api/photos?isUndated=true", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var undatedResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &undatedResp)
+	if undatedResp.Total != 1 || undatedResp.Photos[0].ID != "p-scan" {
+		t.Errorf("Expected p-scan for isUndated=true, got total=%d", undatedResp.Total)
+	}
+
+	// 12. Combined discovery: GET /api/photos?q=Nature&mediaType=image/jpeg&sort=date&order=desc
+	req = httptest.NewRequest("GET", "/api/photos?q=Nature&mediaType=image/jpeg&sort=date&order=desc", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var combResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &combResp)
+	if combResp.Total != 1 || combResp.Photos[0].ID != "p-alps" {
+		t.Errorf("Expected 1 result p-alps for combined query, got %d", combResp.Total)
+	}
+
+	// 13. Timeline with search query: GET /api/timeline?q=lake
+	req = httptest.NewRequest("GET", "/api/timeline?q=lake", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var tlResp api.TimelineResponse
+	_ = json.Unmarshal(body, &tlResp)
+	if tlResp.Total != 1 || len(tlResp.Photos) != 1 || tlResp.Photos[0].ID != "p-lake" {
+		t.Errorf("Timeline search q=lake failed: total=%d", tlResp.Total)
+	}
+}

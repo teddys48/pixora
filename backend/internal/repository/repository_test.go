@@ -581,3 +581,253 @@ func TestPhotoRepositoryTimelineAndAdjacent(t *testing.T) {
 		t.Errorf("Expected ErrNotFound for nonexistent adjacent query, got %v", err)
 	}
 }
+
+func TestPhotoRepositorySearchAndFilter(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := repository.NewSQLitePhotoRepository(db)
+	albumRepo := repository.NewSQLiteAlbumRepository(db)
+	ctx := context.Background()
+
+	// Create test album
+	album := &models.Album{
+		ID:          "album-vacation",
+		Name:        "Vacation 2026",
+		Description: "Trip to mountains and beach",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	if err := albumRepo.Create(ctx, album); err != nil {
+		t.Fatalf("Failed to create test album: %v", err)
+	}
+
+	d1 := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 6, 15, 15, 30, 0, 0, time.UTC)
+	d3 := time.Date(2026, 7, 20, 8, 45, 0, 0, time.UTC)
+	m1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m2 := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	// Photos fixture
+	photos := []*models.Photo{
+		{
+			ID:               "p-mountain-1",
+			RelativePath:     "Travel/Mountains/Everest_Summit.jpg",
+			OriginalFilename: "Everest_Summit.jpg",
+			MediaType:        "image/jpeg",
+			FileSize:         500000,
+			TakenAt:          &d1,
+			FileModifiedAt:   m1,
+		},
+		{
+			ID:               "p-mountain-2",
+			RelativePath:     "Travel/Mountains/Fuji_Sunset.png",
+			OriginalFilename: "Fuji_Sunset.png",
+			MediaType:        "image/png",
+			FileSize:         800000,
+			TakenAt:          &d2,
+			FileModifiedAt:   m2,
+		},
+		{
+			ID:               "p-beach-1",
+			RelativePath:     "Travel/Beach/Hawaii_Coast.jpg",
+			OriginalFilename: "Hawaii_Coast.jpg",
+			MediaType:        "image/jpeg",
+			FileSize:         300000,
+			TakenAt:          &d3,
+			FileModifiedAt:   m1,
+		},
+		{
+			ID:               "p-special-wildcard",
+			RelativePath:     "Special/100%_pure_gold_final.jpg",
+			OriginalFilename: "100%_pure_gold_final.jpg",
+			MediaType:        "image/jpeg",
+			FileSize:         150000,
+			TakenAt:          nil, // Undated
+			FileModifiedAt:   m2,
+		},
+		{
+			ID:               "p-undated-doc",
+			RelativePath:     "Documents/Scan_001.webp",
+			OriginalFilename: "Scan_001.webp",
+			MediaType:        "image/webp",
+			FileSize:         100000,
+			TakenAt:          nil, // Undated
+			FileModifiedAt:   m1,
+		},
+	}
+
+	for _, p := range photos {
+		if err := repo.Create(ctx, p); err != nil {
+			t.Fatalf("Failed to create fixture photo %s: %v", p.ID, err)
+		}
+	}
+
+	// Add p-mountain-1 and p-beach-1 to album
+	_, err := albumRepo.AddPhotos(ctx, album.ID, []string{"p-mountain-1", "p-beach-1"})
+	if err != nil {
+		t.Fatalf("Failed to add photos to album: %v", err)
+	}
+
+	// 1. Filename search: exact & substring case-insensitive
+	res, total, err := repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "everest"})
+	if err != nil || total != 1 || len(res) != 1 || res[0].ID != "p-mountain-1" {
+		t.Errorf("Filename search 'everest' failed: total=%d, photos=%+v, err=%v", total, res, err)
+	}
+
+	// Case-insensitivity: "FUJI" matching "Fuji_Sunset.png"
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "FUJI"})
+	if err != nil || total != 1 || len(res) != 1 || res[0].ID != "p-mountain-2" {
+		t.Errorf("Case-insensitive search 'FUJI' failed: total=%d, photos=%+v, err=%v", total, res, err)
+	}
+
+	// 2. Folder path search in query
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "Travel/Beach"})
+	if err != nil || total != 1 || len(res) != 1 || res[0].ID != "p-beach-1" {
+		t.Errorf("Folder path search failed: total=%d, photos=%+v, err=%v", total, res, err)
+	}
+
+	// 3. Literal wildcard characters (% and _)
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "100%"})
+	if err != nil || total != 1 || len(res) != 1 || res[0].ID != "p-special-wildcard" {
+		t.Errorf("Wildcard search '100%%' failed: total=%d, photos=%+v, err=%v", total, res, err)
+	}
+
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "_pure_"})
+	if err != nil || total != 1 || len(res) != 1 || res[0].ID != "p-special-wildcard" {
+		t.Errorf("Wildcard search '_pure_' failed: total=%d, photos=%+v, err=%v", total, res, err)
+	}
+
+	// 4. Empty and whitespace-only query returns all photos
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "   "})
+	if err != nil || total != 5 || len(res) != 5 {
+		t.Errorf("Whitespace query should return all 5 photos: total=%d, err=%v", total, err)
+	}
+
+	// 5. SQL Injection string resistance
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Query: "' OR '1'='1"})
+	if err != nil || total != 0 {
+		t.Errorf("SQL injection attempt should safely return 0 results: total=%d, err=%v", total, err)
+	}
+
+	// 6. Date range filtering on verified capture date (taken_at)
+	start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 30, 23, 59, 59, 0, time.UTC)
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{StartDate: &start, EndDate: &end, SortBy: "date", SortOrder: "asc"})
+	if err != nil || total != 2 || len(res) != 2 {
+		t.Fatalf("Date range filter [May-Jun 2026] failed: total=%d, len=%d, err=%v", total, len(res), err)
+	}
+	if res[0].ID != "p-mountain-1" || res[1].ID != "p-mountain-2" {
+		t.Errorf("Expected p-mountain-1 (May) then p-mountain-2 (June), got: %s, %s", res[0].ID, res[1].ID)
+	}
+
+	// 7. Undated filter
+	isUndatedTrue := true
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{IsUndated: &isUndatedTrue})
+	if err != nil || total != 2 || len(res) != 2 {
+		t.Errorf("IsUndated=true filter failed: total=%d, len=%d, err=%v", total, len(res), err)
+	}
+
+	isUndatedFalse := false
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{IsUndated: &isUndatedFalse})
+	if err != nil || total != 3 || len(res) != 3 {
+		t.Errorf("IsUndated=false filter failed: total=%d, len=%d, err=%v", total, len(res), err)
+	}
+
+	// 8. Physical folder filtering (recursive vs direct)
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Folder: "Travel", Recursive: true})
+	if err != nil || total != 3 || len(res) != 3 {
+		t.Errorf("Folder 'Travel' recursive failed: total=%d, len=%d, err=%v", total, len(res), err)
+	}
+
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Folder: "Travel", Recursive: false})
+	if err != nil || total != 0 {
+		t.Errorf("Folder 'Travel' non-recursive should have 0 direct photos: total=%d, err=%v", total, err)
+	}
+
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{Folder: "Travel/Mountains", Recursive: false})
+	if err != nil || total != 2 {
+		t.Errorf("Folder 'Travel/Mountains' non-recursive failed: total=%d, err=%v", total, err)
+	}
+
+	// 9. Virtual album filtering
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{AlbumID: album.ID})
+	if err != nil || total != 2 || len(res) != 2 {
+		t.Errorf("Album filter failed: total=%d, len=%d, err=%v", total, len(res), err)
+	}
+
+	// 10. Media type filtering
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{MediaType: "image/png"})
+	if err != nil || total != 1 || res[0].ID != "p-mountain-2" {
+		t.Errorf("MediaType 'image/png' filter failed: total=%d, err=%v", total, err)
+	}
+
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{MediaType: "image/*"})
+	if err != nil || total != 5 {
+		t.Errorf("MediaType 'image/*' prefix filter failed: total=%d, err=%v", total, err)
+	}
+
+	// 11. Sorting tests
+	// Date desc: dated newest first (d3 Hawaii, d2 Fuji, d1 Everest), then undated
+	res, _, _ = repo.SearchAndFilter(ctx, repository.PhotoFilter{SortBy: "date", SortOrder: "desc"})
+	if res[0].ID != "p-beach-1" || res[1].ID != "p-mountain-2" || res[2].ID != "p-mountain-1" {
+		t.Errorf("Unexpected date desc order: %s, %s, %s", res[0].ID, res[1].ID, res[2].ID)
+	}
+
+	// Date asc: dated oldest first (d1 Everest, d2 Fuji, d3 Hawaii), then undated
+	res, _, _ = repo.SearchAndFilter(ctx, repository.PhotoFilter{SortBy: "date", SortOrder: "asc"})
+	if res[0].ID != "p-mountain-1" || res[1].ID != "p-mountain-2" || res[2].ID != "p-beach-1" {
+		t.Errorf("Unexpected date asc order: %s, %s, %s", res[0].ID, res[1].ID, res[2].ID)
+	}
+
+	// Filename asc: 100%_pure..., Everest_Summit..., Fuji_Sunset..., Hawaii_Coast..., Scan_001...
+	res, _, _ = repo.SearchAndFilter(ctx, repository.PhotoFilter{SortBy: "filename", SortOrder: "asc"})
+	if res[0].ID != "p-special-wildcard" || res[1].ID != "p-mountain-1" {
+		t.Errorf("Unexpected filename asc order: %s, %s", res[0].ID, res[1].ID)
+	}
+
+	// FileSize desc: Fuji (800k), Everest (500k), Hawaii (300k), Special (150k), Scan (100k)
+	res, _, _ = repo.SearchAndFilter(ctx, repository.PhotoFilter{SortBy: "size", SortOrder: "desc"})
+	if res[0].ID != "p-mountain-2" || res[1].ID != "p-mountain-1" || res[2].ID != "p-beach-1" {
+		t.Errorf("Unexpected size desc order: %s, %s, %s", res[0].ID, res[1].ID, res[2].ID)
+	}
+
+	// 12. Combined search + filter + sort + pagination
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{
+		Query:     "Travel",
+		MediaType: "image/jpeg",
+		AlbumID:   album.ID,
+		SortBy:    "date",
+		SortOrder: "desc",
+		Limit:     1,
+		Offset:    0,
+	})
+	if err != nil || total != 2 || len(res) != 1 || res[0].ID != "p-beach-1" {
+		t.Errorf("Combined filter page 1 failed: total=%d, len=%d, res[0]=%+v, err=%v", total, len(res), res, err)
+	}
+
+	// Page 2
+	res, total, err = repo.SearchAndFilter(ctx, repository.PhotoFilter{
+		Query:     "Travel",
+		MediaType: "image/jpeg",
+		AlbumID:   album.ID,
+		SortBy:    "date",
+		SortOrder: "desc",
+		Limit:     1,
+		Offset:    1,
+	})
+	if err != nil || total != 2 || len(res) != 1 || res[0].ID != "p-mountain-1" {
+		t.Errorf("Combined filter page 2 failed: total=%d, len=%d, res[0]=%+v, err=%v", total, len(res), res, err)
+	}
+
+	// 13. Timeline with filter
+	tlRes, tlTotal, tlErr := repo.ListTimelineWithFilter(ctx, repository.PhotoFilter{
+		Folder: "Travel/Mountains",
+	})
+	if tlErr != nil || tlTotal != 2 || len(tlRes) != 2 {
+		t.Errorf("ListTimelineWithFilter failed: total=%d, len=%d, err=%v", tlTotal, len(tlRes), tlErr)
+	}
+	if tlRes[0].ID != "p-mountain-2" || tlRes[1].ID != "p-mountain-1" {
+		t.Errorf("Timeline chronological order mismatch: %s, %s", tlRes[0].ID, tlRes[1].ID)
+	}
+}

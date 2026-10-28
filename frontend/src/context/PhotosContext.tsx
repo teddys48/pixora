@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Photo, PhotoSortOption, PhotoViewMode, ScanStatus } from '@/types/photo'
 import { fetchPhotos, triggerScan, fetchScanStatus } from '@/lib/api'
 
@@ -14,6 +14,22 @@ interface PhotosContextType {
   setViewMode: (mode: PhotoViewMode) => void
   searchQuery: string
   setSearchQuery: (query: string) => void
+  startDate: string
+  setStartDate: (date: string) => void
+  endDate: string
+  setEndDate: (date: string) => void
+  folderFilter: string
+  setFolderFilter: (folder: string) => void
+  albumFilter: string
+  setAlbumFilter: (albumId: string) => void
+  mediaTypeFilter: string
+  setMediaTypeFilter: (mediaType: string) => void
+  undatedOnly: boolean
+  setUndatedOnly: (undated: boolean) => void
+  hasActiveFilters: boolean
+  activeFiltersCount: number
+  clearFilters: () => void
+  resetAll: () => void
   isScanning: boolean
   scanResult: ScanStatus | null
   setScanResult: (res: ScanStatus | null) => void
@@ -32,44 +48,146 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Search and discovery filter states
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
+  const [folderFilter, setFolderFilter] = useState('')
+  const [albumFilter, setAlbumFilter] = useState('')
+  const [mediaTypeFilter, setMediaTypeFilter] = useState('')
+  const [undatedOnly, setUndatedOnly] = useState(false)
+
   const [sortOption, setSortOption] = useState<PhotoSortOption>('date-desc')
   const [viewMode, setViewMode] = useState<PhotoViewMode>('grid')
 
   const [isScanning, setIsScanning] = useState(false)
   const [scanResult, setScanResult] = useState<ScanStatus | null>(null)
 
-  const loadPhotos = useCallback(async (isInitial = false) => {
-    if (isInitial) {
-      setIsLoading(true)
-      setError(null)
+  // In-flight request cancellation
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  // Debounce search query changes by 300ms
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery)
+    }, 300)
+    return () => clearTimeout(handler)
+  }, [searchQuery])
+
+  // Count active filters (excluding default sort/view)
+  const activeFiltersCount = useMemo(() => {
+    let count = 0
+    if (debouncedSearchQuery.trim()) count++
+    if (startDate) count++
+    if (endDate) count++
+    if (folderFilter) count++
+    if (albumFilter) count++
+    if (mediaTypeFilter) count++
+    if (undatedOnly) count++
+    return count
+  }, [debouncedSearchQuery, startDate, endDate, folderFilter, albumFilter, mediaTypeFilter, undatedOnly])
+
+  const hasActiveFilters = activeFiltersCount > 0
+
+  const clearFilters = useCallback(() => {
+    setStartDate('')
+    setEndDate('')
+    setFolderFilter('')
+    setAlbumFilter('')
+    setMediaTypeFilter('')
+    setUndatedOnly(false)
+  }, [])
+
+  const resetAll = useCallback(() => {
+    setSearchQuery('')
+    setDebouncedSearchQuery('')
+    clearFilters()
+  }, [clearFilters])
+
+  const mapSortOption = useCallback((option: PhotoSortOption): [string, string] => {
+    switch (option) {
+      case 'date-desc':
+        return ['date', 'desc']
+      case 'date-asc':
+        return ['date', 'asc']
+      case 'title-asc':
+        return ['filename', 'asc']
+      case 'title-desc':
+        return ['filename', 'desc']
+      case 'size-desc':
+        return ['size', 'desc']
+      case 'size-asc':
+        return ['size', 'asc']
+      case 'modified-desc':
+        return ['modified', 'desc']
+      case 'modified-asc':
+        return ['modified', 'asc']
+      default:
+        return ['date', 'desc']
     }
+  }, [])
 
-    try {
-      const [sortBy, order] = sortOption.startsWith('title')
-        ? ['filename', sortOption.endsWith('asc') ? 'asc' : 'desc']
-        : sortOption.startsWith('size')
-        ? ['size', 'desc']
-        : ['date', sortOption.endsWith('asc') ? 'asc' : 'desc']
-
-      const result = await fetchPhotos({
-        limit: 50,
-        offset: 0,
-        sort: sortBy,
-        order: order,
-      })
-
-      setPhotos(result.photos)
-      setTotalPhotos(result.total)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load photos'
-      setError(msg)
-    } finally {
-      if (isInitial) {
-        setIsLoading(false)
+  const loadPhotos = useCallback(
+    async (isInitial = false) => {
+      // Abort previous in-flight request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
       }
-    }
-  }, [sortOption])
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+
+      if (isInitial) {
+        setIsLoading(true)
+        setError(null)
+      }
+
+      try {
+        const [sortBy, order] = mapSortOption(sortOption)
+
+        const result = await fetchPhotos(
+          {
+            limit: 50,
+            offset: 0,
+            sort: sortBy,
+            order: order,
+            q: debouncedSearchQuery.trim() || undefined,
+            startDate: startDate || undefined,
+            endDate: endDate || undefined,
+            folder: folderFilter || undefined,
+            albumId: albumFilter || undefined,
+            mediaType: mediaTypeFilter || undefined,
+            isUndated: undatedOnly ? true : undefined,
+          },
+          controller.signal
+        )
+
+        setPhotos(result.photos)
+        setTotalPhotos(result.total)
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return // Request was intentionally cancelled
+        }
+        const msg = err instanceof Error ? err.message : 'Failed to load photos'
+        setError(msg)
+      } finally {
+        if (isInitial) {
+          setIsLoading(false)
+        }
+      }
+    },
+    [
+      sortOption,
+      debouncedSearchQuery,
+      startDate,
+      endDate,
+      folderFilter,
+      albumFilter,
+      mediaTypeFilter,
+      undatedOnly,
+      mapSortOption,
+    ]
+  )
 
   useEffect(() => {
     loadPhotos(true)
@@ -80,17 +198,20 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
     setIsLoadingMore(true)
 
     try {
-      const [sortBy, order] = sortOption.startsWith('title')
-        ? ['filename', sortOption.endsWith('asc') ? 'asc' : 'desc']
-        : sortOption.startsWith('size')
-        ? ['size', 'desc']
-        : ['date', sortOption.endsWith('asc') ? 'asc' : 'desc']
+      const [sortBy, order] = mapSortOption(sortOption)
 
       const result = await fetchPhotos({
         limit: 50,
         offset: photos.length,
         sort: sortBy,
         order: order,
+        q: debouncedSearchQuery.trim() || undefined,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+        folder: folderFilter || undefined,
+        albumId: albumFilter || undefined,
+        mediaType: mediaTypeFilter || undefined,
+        isUndated: undatedOnly ? true : undefined,
       })
 
       setPhotos((prev) => [...prev, ...result.photos])
@@ -101,7 +222,20 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoadingMore(false)
     }
-  }, [isLoadingMore, photos.length, totalPhotos, sortOption])
+  }, [
+    isLoadingMore,
+    photos.length,
+    totalPhotos,
+    sortOption,
+    debouncedSearchQuery,
+    startDate,
+    endDate,
+    folderFilter,
+    albumFilter,
+    mediaTypeFilter,
+    undatedOnly,
+    mapSortOption,
+  ])
 
   const refreshPhotos = useCallback(async () => {
     await loadPhotos(false)
@@ -156,6 +290,22 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
         setViewMode,
         searchQuery,
         setSearchQuery,
+        startDate,
+        setStartDate,
+        endDate,
+        setEndDate,
+        folderFilter,
+        setFolderFilter,
+        albumFilter,
+        setAlbumFilter,
+        mediaTypeFilter,
+        setMediaTypeFilter,
+        undatedOnly,
+        setUndatedOnly,
+        hasActiveFilters,
+        activeFiltersCount,
+        clearFilters,
+        resetAll,
         isScanning,
         scanResult,
         setScanResult,
