@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -661,6 +662,188 @@ func TestPhysicalFolderBrowsingFullLifecycle(t *testing.T) {
 	} {
 		if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
 			t.Errorf("Original media file %s was unexpectedly removed or modified", expectedFile)
+		}
+	}
+}
+
+func TestPhase5TimelineAndViewerLifecycle(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_phase5_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mediaDir := filepath.Join(tempDir, "media")
+	dbPath := filepath.Join(tempDir, "data", "pixora.db")
+	_ = os.MkdirAll(mediaDir, 0755)
+	_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
+
+	// Create test image files in storage
+	_ = os.WriteFile(filepath.Join(mediaDir, "nature_dated1.jpg"), createTestJPEG(600, 400), 0644)
+	_ = os.WriteFile(filepath.Join(mediaDir, "nature_dated2.jpg"), createTestJPEG(800, 600), 0644)
+	_ = os.WriteFile(filepath.Join(mediaDir, "graphic_undated.jpg"), createTestJPEG(400, 400), 0644)
+
+	cfg := &config.Config{
+		Port:         "8080",
+		Host:         "127.0.0.1",
+		Env:          "testing",
+		StorageRoot:  mediaDir,
+		DatabasePath: dbPath,
+	}
+
+	store, err := storage.New(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("Failed to init storage: %v", err)
+	}
+
+	db, err := database.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatalf("Failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	albumRepo := repository.NewSQLiteAlbumRepository(db)
+	thumbSvc := media.NewThumbnailService(store)
+	mediaScanner := scanner.New(store, photoRepo)
+
+	app := server.NewWithDependencies(server.Dependencies{
+		Config:    cfg,
+		DB:        db,
+		Storage:   store,
+		PhotoRepo: photoRepo,
+		AlbumRepo: albumRepo,
+		Thumbnail: thumbSvc,
+		Scanner:   mediaScanner,
+	})
+
+	// 1. Scan photos into database
+	reqScan := httptest.NewRequest("POST", "/api/photos/scan?sync=true", nil)
+	respScan, err := app.Test(reqScan, -1)
+	if err != nil || respScan.StatusCode != fiber.StatusOK {
+		t.Fatalf("Initial scan failed: %v, status %d", err, respScan.StatusCode)
+	}
+
+	// Retrieve scanned records
+	allPhotos, _, err := photoRepo.List(t.Context(), 0, 10, "filename", "asc")
+	if err != nil || len(allPhotos) != 3 {
+		t.Fatalf("Expected 3 indexed photos, got %d (err: %v)", len(allPhotos), err)
+	}
+
+	// Update two photos to have verified capture dates (DateTimeOriginal)
+	tCapture1 := time.Date(2026, 10, 24, 15, 30, 0, 0, time.UTC)
+	tCapture2 := time.Date(2026, 10, 24, 10, 15, 0, 0, time.UTC)
+
+	pDated1 := allPhotos[1] // nature_dated1.jpg
+	pDated1.TakenAt = &tCapture1
+	_ = photoRepo.Update(t.Context(), &pDated1)
+
+	pDated2 := allPhotos[2] // nature_dated2.jpg
+	pDated2.TakenAt = &tCapture2
+	_ = photoRepo.Update(t.Context(), &pDated2)
+
+	// pUndated remains with TakenAt = nil
+	pUndated := allPhotos[0] // graphic_undated.jpg
+
+	// 2. Query GET /api/timeline
+	reqTimeline := httptest.NewRequest("GET", "/api/timeline", nil)
+	respTimeline, err := app.Test(reqTimeline, -1)
+	if err != nil {
+		t.Fatalf("Timeline request failed: %v", err)
+	}
+	if respTimeline.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 for /api/timeline, got %d", respTimeline.StatusCode)
+	}
+
+	var timelineResp api.TimelineResponse
+	_ = json.NewDecoder(respTimeline.Body).Decode(&timelineResp)
+
+	if timelineResp.Total != 3 || len(timelineResp.Photos) != 3 {
+		t.Fatalf("Expected 3 photos in timeline, got %d", len(timelineResp.Photos))
+	}
+
+	// Check chronological ordering:
+	// pDated1 (15:30) -> pDated2 (10:15) -> pUndated (nil capture date)
+	if timelineResp.Photos[0].ID != pDated1.ID {
+		t.Errorf("First photo should be newest capture date %s, got %s", pDated1.ID, timelineResp.Photos[0].ID)
+	}
+	if timelineResp.Photos[1].ID != pDated2.ID {
+		t.Errorf("Second photo should be earlier capture date %s, got %s", pDated2.ID, timelineResp.Photos[1].ID)
+	}
+	if timelineResp.Photos[2].ID != pUndated.ID {
+		t.Errorf("Third photo should be undated %s, got %s", pUndated.ID, timelineResp.Photos[2].ID)
+	}
+	if !timelineResp.Photos[2].IsUndated {
+		t.Errorf("Expected third photo to be flagged as isUndated=true")
+	}
+
+	// Check Day Grouping
+	if len(timelineResp.Groups) != 2 {
+		t.Fatalf("Expected 2 groups (dated day + undated), got %d", len(timelineResp.Groups))
+	}
+	datedGroup := timelineResp.Groups[0]
+	if datedGroup.Date != "2026-10-24" || len(datedGroup.Photos) != 2 || datedGroup.IsUndated {
+		t.Errorf("Unexpected dated group: %+v", datedGroup)
+	}
+	undatedGroup := timelineResp.Groups[1]
+	if undatedGroup.Date != "undated" || len(undatedGroup.Photos) != 1 || !undatedGroup.IsUndated {
+		t.Errorf("Unexpected undated group: %+v", undatedGroup)
+	}
+
+	// 3. Test cursor pagination
+	reqCursor := httptest.NewRequest("GET", "/api/timeline?limit=1&offset=0", nil)
+	respCursor, _ := app.Test(reqCursor, -1)
+	var cursorResp api.TimelineResponse
+	_ = json.NewDecoder(respCursor.Body).Decode(&cursorResp)
+	if !cursorResp.HasMore || cursorResp.NextCursor == "" {
+		t.Errorf("Expected hasMore=true and valid nextCursor for limit=1")
+	}
+
+	reqNext := httptest.NewRequest("GET", "/api/timeline?limit=1&cursor="+cursorResp.NextCursor, nil)
+	respNext, _ := app.Test(reqNext, -1)
+	var nextResp api.TimelineResponse
+	_ = json.NewDecoder(respNext.Body).Decode(&nextResp)
+	if len(nextResp.Photos) != 1 || nextResp.Photos[0].ID != pDated2.ID {
+		t.Errorf("Expected second photo via cursor, got: %+v", nextResp.Photos)
+	}
+
+	// 4. Test GET /api/photos/:id with adjacent lookup
+	reqAdj := httptest.NewRequest("GET", fmt.Sprintf("/api/photos/%s?collectionType=timeline", pDated2.ID), nil)
+	respAdj, _ := app.Test(reqAdj, -1)
+	var pAdj api.PhotoResponse
+	_ = json.NewDecoder(respAdj.Body).Decode(&pAdj)
+
+	if pAdj.PrevID == nil || *pAdj.PrevID != pDated1.ID {
+		t.Errorf("Expected PrevID %s, got %v", pDated1.ID, pAdj.PrevID)
+	}
+	if pAdj.NextID == nil || *pAdj.NextID != pUndated.ID {
+		t.Errorf("Expected NextID %s, got %v", pUndated.ID, pAdj.NextID)
+	}
+
+	// 5. Verify Photo Viewer endpoints
+	reqFile := httptest.NewRequest("GET", fmt.Sprintf("/api/photos/%s/file", pDated1.ID), nil)
+	respFile, _ := app.Test(reqFile, -1)
+	if respFile.StatusCode != fiber.StatusOK || respFile.Header.Get("Content-Type") != "image/jpeg" {
+		t.Errorf("Expected 200 image/jpeg serving original file, got status %d", respFile.StatusCode)
+	}
+
+	reqThumb := httptest.NewRequest("GET", fmt.Sprintf("/api/photos/%s/thumbnail", pDated1.ID), nil)
+	respThumb, _ := app.Test(reqThumb, -1)
+	if respThumb.StatusCode != fiber.StatusOK || respThumb.Header.Get("Content-Type") != "image/jpeg" {
+		t.Errorf("Expected 200 image/jpeg serving thumbnail, got status %d", respThumb.StatusCode)
+	}
+
+	// 6. Test GET /api/photos/:id with nonexistent ID returns 404
+	reqMissing := httptest.NewRequest("GET", "/api/photos/00000000-0000-0000-0000-000000000000", nil)
+	respMissing, _ := app.Test(reqMissing, -1)
+	if respMissing.StatusCode != fiber.StatusNotFound {
+		t.Errorf("Expected 404 for missing photo ID, got %d", respMissing.StatusCode)
+	}
+
+	// 7. Non-destructive guarantee: files on disk still exist
+	for _, f := range []string{"nature_dated1.jpg", "nature_dated2.jpg", "graphic_undated.jpg"} {
+		if _, err := os.Stat(filepath.Join(mediaDir, f)); os.IsNotExist(err) {
+			t.Errorf("File %s was unexpectedly removed", f)
 		}
 	}
 }

@@ -9,10 +9,12 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"math/big"
 	"strings"
 	"time"
 
 	"github.com/rwcarlsen/goexif/exif"
+	"github.com/rwcarlsen/goexif/tiff"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
@@ -44,6 +46,16 @@ type ImageInfo struct {
 	Height      int
 	TakenAt     *time.Time
 	Orientation int
+}
+
+// ExifDetails contains extended photography metadata for photo viewer display.
+type ExifDetails struct {
+	Camera       string `json:"camera,omitempty"`
+	Lens         string `json:"lens,omitempty"`
+	FocalLength  string `json:"focalLength,omitempty"`
+	Aperture     string `json:"aperture,omitempty"`
+	ShutterSpeed string `json:"shutterSpeed,omitempty"`
+	ISO          *int   `json:"iso,omitempty"`
 }
 
 // SniffMediaType detects the MIME type and canonical extension based on magic header bytes.
@@ -89,6 +101,79 @@ func IsSupportedExtension(filename string) bool {
 	default:
 		return false
 	}
+}
+
+// parseExifTimestamp attempts to parse a string representation of an EXIF timestamp.
+func parseExifTimestamp(raw string) (*time.Time, error) {
+	cleaned := strings.Trim(strings.TrimSpace(raw), "\"")
+	if cleaned == "" || strings.HasPrefix(cleaned, "0000:00:00") {
+		return nil, errors.New("empty or zero EXIF date")
+	}
+
+	// Standard EXIF format: "2006:01:02 15:04:05"
+	layouts := []string{
+		"2006:01:02 15:04:05",
+		"2006-01-02 15:04:05",
+		"2006:01:02 15:04",
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05",
+		time.RFC3339,
+	}
+
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, cleaned); err == nil && !t.IsZero() && t.Year() > 1970 {
+			utc := t.UTC()
+			return &utc, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unrecognized EXIF timestamp format %q", cleaned)
+}
+
+// ExtractCaptureDateFromExif extracts the best capture date from EXIF adhering to strict precedence:
+// 1. EXIF DateTimeOriginal (primary photo capture instant)
+// 2. EXIF DateTimeDigitized (alternative valid capture timestamp)
+// 3. EXIF DateTime (EXIF file timestamp)
+// 4. Returns nil if no valid EXIF date is found
+func ExtractCaptureDateFromExif(x *exif.Exif) *time.Time {
+	if x == nil {
+		return nil
+	}
+
+	// 1. Try DateTimeOriginal
+	if tag, err := x.Get(exif.DateTimeOriginal); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			if parsed, err := parseExifTimestamp(val); err == nil {
+				return parsed
+			}
+		}
+	}
+
+	// 2. Try DateTimeDigitized
+	if tag, err := x.Get(exif.DateTimeDigitized); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			if parsed, err := parseExifTimestamp(val); err == nil {
+				return parsed
+			}
+		}
+	}
+
+	// 3. Try DateTime
+	if tag, err := x.Get(exif.DateTime); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			if parsed, err := parseExifTimestamp(val); err == nil {
+				return parsed
+			}
+		}
+	}
+
+	// Fallback to goexif's built-in parser if tags were structured differently
+	if dt, err := x.DateTime(); err == nil && !dt.IsZero() && dt.Year() > 1970 {
+		utc := dt.UTC()
+		return &utc
+	}
+
+	return nil
 }
 
 // ExtractMetadata reads image dimensions, format, and EXIF metadata without loading the entire image into memory.
@@ -143,14 +228,11 @@ func ExtractMetadata(r io.ReadSeeker) (ImageInfo, error) {
 		if _, err := r.Seek(0, io.SeekStart); err == nil {
 			x, err := exif.Decode(r)
 			if err == nil && x != nil {
-				// Extract capture time
-				if dt, err := x.DateTime(); err == nil && !dt.IsZero() {
-					utc := dt.UTC()
-					info.TakenAt = &utc
-				}
+				// Extract capture time using documented precedence
+				info.TakenAt = ExtractCaptureDateFromExif(x)
 
 				// Extract orientation tag (1-8)
-				if tag, err := x.Get(exif.Orientation); err == nil {
+				if tag, err := x.Get(exif.Orientation); err == nil && tag != nil {
 					if orientVal, err := tag.Int(0); err == nil && orientVal >= 1 && orientVal <= 8 {
 						info.Orientation = orientVal
 					}
@@ -178,18 +260,117 @@ func ParseEXIFSafe(data []byte) (*time.Time, int) {
 		return nil, 1
 	}
 
-	var takenAt *time.Time
-	if dt, err := x.DateTime(); err == nil && !dt.IsZero() {
-		utc := dt.UTC()
-		takenAt = &utc
-	}
+	takenAt := ExtractCaptureDateFromExif(x)
 
 	orientation := 1
-	if tag, err := x.Get(exif.Orientation); err == nil {
+	if tag, err := x.Get(exif.Orientation); err == nil && tag != nil {
 		if val, err := tag.Int(0); err == nil && val >= 1 && val <= 8 {
 			orientation = val
 		}
 	}
 
 	return takenAt, orientation
+}
+
+// ExtractExifDetails parses extended camera and exposure metadata safely from an image reader.
+func ExtractExifDetails(r io.ReadSeeker) (*ExifDetails, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	x, err := exif.Decode(r)
+	if err != nil || x == nil {
+		return nil, nil // No EXIF or not decodable; return nil without error
+	}
+
+	details := &ExifDetails{}
+	var makeVal, modelVal string
+
+	if tag, err := x.Get(exif.Make); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			makeVal = strings.Trim(strings.TrimSpace(val), "\"")
+		}
+	}
+
+	if tag, err := x.Get(exif.Model); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			modelVal = strings.Trim(strings.TrimSpace(val), "\"")
+		}
+	}
+
+	if makeVal != "" || modelVal != "" {
+		if strings.Contains(strings.ToLower(modelVal), strings.ToLower(makeVal)) {
+			details.Camera = modelVal
+		} else if makeVal != "" && modelVal != "" {
+			details.Camera = fmt.Sprintf("%s %s", makeVal, modelVal)
+		} else if modelVal != "" {
+			details.Camera = modelVal
+		} else {
+			details.Camera = makeVal
+		}
+	}
+
+	// LensModel (Tag 0xA434)
+	if tag, err := x.Get(exif.FieldName("LensModel")); err == nil && tag != nil {
+		if val, err := tag.StringVal(); err == nil {
+			details.Lens = strings.Trim(strings.TrimSpace(val), "\"")
+		}
+	}
+
+	// FocalLength
+	if tag, err := x.Get(exif.FocalLength); err == nil && tag != nil {
+		if num, den, err := tag.Rat2(0); err == nil && den > 0 {
+			val := float64(num) / float64(den)
+			details.FocalLength = fmt.Sprintf("%.0fmm", val)
+		} else if rat := getRatVal(tag); rat != nil {
+			f, _ := rat.Float64()
+			details.FocalLength = fmt.Sprintf("%.0fmm", f)
+		}
+	}
+
+	// Aperture (FNumber)
+	if tag, err := x.Get(exif.FNumber); err == nil && tag != nil {
+		if num, den, err := tag.Rat2(0); err == nil && den > 0 {
+			f := float64(num) / float64(den)
+			details.Aperture = fmt.Sprintf("f/%.1f", f)
+		} else if rat := getRatVal(tag); rat != nil {
+			f, _ := rat.Float64()
+			details.Aperture = fmt.Sprintf("f/%.1f", f)
+		}
+	}
+
+	// ExposureTime (Shutter Speed)
+	if tag, err := x.Get(exif.ExposureTime); err == nil && tag != nil {
+		if num, den, err := tag.Rat2(0); err == nil && den > 0 {
+			if num == 1 || (den%num == 0 && num > 0) {
+				details.ShutterSpeed = fmt.Sprintf("1/%ds", den/num)
+			} else {
+				val := float64(num) / float64(den)
+				if val < 1.0 {
+					details.ShutterSpeed = fmt.Sprintf("1/%.0fs", 1.0/val)
+				} else {
+					details.ShutterSpeed = fmt.Sprintf("%.1fs", val)
+				}
+			}
+		}
+	}
+
+	// ISO (ISOSpeedRatings)
+	if tag, err := x.Get(exif.ISOSpeedRatings); err == nil && tag != nil {
+		if iso, err := tag.Int(0); err == nil && iso > 0 {
+			details.ISO = &iso
+		}
+	}
+
+	return details, nil
+}
+
+func getRatVal(tag *tiff.Tag) *big.Rat {
+	if tag == nil {
+		return nil
+	}
+	if rat, err := tag.Rat(0); err == nil {
+		return rat
+	}
+	return nil
 }

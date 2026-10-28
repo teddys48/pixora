@@ -463,3 +463,121 @@ func TestPhotoRepositoryFolderQueries(t *testing.T) {
 		t.Errorf("Expected nil cover for nonexistent folder, got %+v, err: %v", coverEmpty, err)
 	}
 }
+
+func TestPhotoRepositoryTimelineAndAdjacent(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := repository.NewSQLitePhotoRepository(db)
+	ctx := context.Background()
+
+	t1 := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	mod1 := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	mod2 := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
+	mod3 := time.Date(2026, 10, 26, 15, 0, 0, 0, time.UTC)
+	mod4 := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
+
+	_ = repo.Create(ctx, &models.Photo{
+		ID:               "p1",
+		RelativePath:     "originals/p1.jpg",
+		OriginalFilename: "p1.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          &t1,
+		FileModifiedAt:   mod1,
+	})
+	_ = repo.Create(ctx, &models.Photo{
+		ID:               "p2",
+		RelativePath:     "originals/p2.jpg",
+		OriginalFilename: "p2.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          &t2,
+		FileModifiedAt:   mod2,
+	})
+	_ = repo.Create(ctx, &models.Photo{
+		ID:               "p3",
+		RelativePath:     "originals/p3.jpg",
+		OriginalFilename: "p3.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          nil,
+		FileModifiedAt:   mod3,
+	})
+	_ = repo.Create(ctx, &models.Photo{
+		ID:               "p4",
+		RelativePath:     "originals/p4.jpg",
+		OriginalFilename: "p4.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          nil,
+		FileModifiedAt:   mod4,
+	})
+
+	// 1. Verify timeline ordering:
+	// Expected: p1 (dated, newest), p2 (dated, older), p3 (undated, mod 10-26), p4 (undated, mod 10-15)
+	timelinePhotos, total, err := repo.ListTimeline(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("ListTimeline failed: %v", err)
+	}
+	if total != 4 || len(timelinePhotos) != 4 {
+		t.Fatalf("Expected 4 photos in timeline, got total=%d len=%d", total, len(timelinePhotos))
+	}
+	expectedOrder := []string{"p1", "p2", "p3", "p4"}
+	for i, expected := range expectedOrder {
+		if timelinePhotos[i].ID != expected {
+			t.Errorf("Timeline index %d: expected %s, got %s", i, expected, timelinePhotos[i].ID)
+		}
+	}
+
+	// 2. Pagination test
+	page1, _, _ := repo.ListTimeline(ctx, 0, 2)
+	if len(page1) != 2 || page1[0].ID != "p1" || page1[1].ID != "p2" {
+		t.Errorf("Pagination page 1 unexpected: %+v", page1)
+	}
+	page2, _, _ := repo.ListTimeline(ctx, 2, 2)
+	if len(page2) != 2 || page2[0].ID != "p3" || page2[1].ID != "p4" {
+		t.Errorf("Pagination page 2 unexpected: %+v", page2)
+	}
+
+	// 3. Adjacent navigation in timeline
+	prev, next, err := repo.GetAdjacentPhotos(ctx, "p1", "timeline", "")
+	if err != nil {
+		t.Fatalf("GetAdjacentPhotos p1 failed: %v", err)
+	}
+	if prev != nil {
+		t.Errorf("Expected nil prev for first photo p1, got %v", *prev)
+	}
+	if next == nil || *next != "p2" {
+		t.Errorf("Expected next 'p2' for p1, got %v", next)
+	}
+
+	prev, next, err = repo.GetAdjacentPhotos(ctx, "p2", "timeline", "")
+	if err != nil {
+		t.Fatalf("GetAdjacentPhotos p2 failed: %v", err)
+	}
+	if prev == nil || *prev != "p1" {
+		t.Errorf("Expected prev 'p1' for p2, got %v", prev)
+	}
+	if next == nil || *next != "p3" {
+		t.Errorf("Expected next 'p3' for p2, got %v", next)
+	}
+
+	prev, next, err = repo.GetAdjacentPhotos(ctx, "p4", "timeline", "")
+	if err != nil {
+		t.Fatalf("GetAdjacentPhotos p4 failed: %v", err)
+	}
+	if prev == nil || *prev != "p3" {
+		t.Errorf("Expected prev 'p3' for p4, got %v", prev)
+	}
+	if next != nil {
+		t.Errorf("Expected nil next for last photo p4, got %v", *next)
+	}
+
+	// For non-existent photo: ErrNotFound
+	_, _, err = repo.GetAdjacentPhotos(ctx, "nonexistent", "timeline", "")
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("Expected ErrNotFound for nonexistent adjacent query, got %v", err)
+	}
+}

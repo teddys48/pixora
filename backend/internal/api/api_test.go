@@ -89,6 +89,9 @@ func setupTestApp(t *testing.T) (*fiber.App, *database.DB, *storage.Storage, *sc
 	apiGroup.Post("/albums/:id/photos", api.AddPhotosToAlbumHandler(albumRepo))
 	apiGroup.Delete("/albums/:id/photos/:photoId", api.RemovePhotoFromAlbumHandler(albumRepo))
 
+	// Timeline
+	apiGroup.Get("/timeline", api.TimelineHandler(photoRepo))
+
 	// Photos
 	apiGroup.Get("/photos", api.ListPhotosHandler(photoRepo))
 	apiGroup.Post("/photos", api.UploadPhotosHandler(photoRepo, store, thumbSvc))
@@ -96,7 +99,7 @@ func setupTestApp(t *testing.T) (*fiber.App, *database.DB, *storage.Storage, *sc
 	apiGroup.Get("/photos/scan", api.GetScanStatusHandler(scanSvc))
 	apiGroup.Get("/photos/scan/status", api.GetScanStatusHandler(scanSvc))
 	apiGroup.Post("/photos/scan", api.ScanPhotosHandler(scanSvc))
-	apiGroup.Get("/photos/:id", api.GetPhotoHandler(photoRepo))
+	apiGroup.Get("/photos/:id", api.GetPhotoHandler(photoRepo, store))
 	apiGroup.Get("/photos/:id/file", api.ServeOriginalPhotoHandler(photoRepo, store))
 	apiGroup.Get("/photos/:id/thumbnail", api.ServeThumbnailHandler(photoRepo, store, thumbSvc))
 
@@ -614,5 +617,132 @@ func TestScanAPI(t *testing.T) {
 	_ = json.Unmarshal(photosBody, &photosResp)
 	if photosResp.Total != 2 {
 		t.Errorf("Expected 2 indexed photos, got %d", photosResp.Total)
+	}
+}
+
+func TestTimelineAndPhotoViewerAPI(t *testing.T) {
+	app, db, _, _, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	ctx := t.Context()
+
+	// Seed 3 photos:
+	// p1: TakenAt = 2026-10-24 14:00:00 (dated, newest)
+	// p2: TakenAt = 2026-10-24 10:00:00 (dated, same day earlier)
+	// p3: TakenAt = nil (undated), modtime = 2026-10-25
+	t1 := time.Date(2026, 10, 24, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+	m3 := time.Date(2026, 10, 25, 8, 0, 0, 0, time.UTC)
+
+	_ = photoRepo.Create(ctx, &models.Photo{
+		ID:               "p-time-1",
+		RelativePath:     "originals/p1.jpg",
+		OriginalFilename: "p1.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          &t1,
+		FileModifiedAt:   time.Now().UTC(),
+	})
+	_ = photoRepo.Create(ctx, &models.Photo{
+		ID:               "p-time-2",
+		RelativePath:     "originals/p2.jpg",
+		OriginalFilename: "p2.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          &t2,
+		FileModifiedAt:   time.Now().UTC(),
+	})
+	_ = photoRepo.Create(ctx, &models.Photo{
+		ID:               "p-time-3",
+		RelativePath:     "originals/p3.jpg",
+		OriginalFilename: "p3.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         1000,
+		TakenAt:          nil,
+		FileModifiedAt:   m3,
+	})
+
+	// 1. GET /api/timeline
+	req := httptest.NewRequest("GET", "/api/timeline?limit=10&offset=0", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Timeline request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	var timeResp api.TimelineResponse
+	if err := json.Unmarshal(body, &timeResp); err != nil {
+		t.Fatalf("Failed to unmarshal timeline response: %v", err)
+	}
+
+	if timeResp.Total != 3 || len(timeResp.Photos) != 3 {
+		t.Fatalf("Expected 3 photos in timeline, got total=%d len=%d", timeResp.Total, len(timeResp.Photos))
+	}
+
+	// Verify photos list order: p-time-1, p-time-2, then p-time-3
+	if timeResp.Photos[0].ID != "p-time-1" || timeResp.Photos[1].ID != "p-time-2" || timeResp.Photos[2].ID != "p-time-3" {
+		t.Errorf("Unexpected photo sequence in timeline: %+v", timeResp.Photos)
+	}
+	if timeResp.Photos[2].IsUndated != true {
+		t.Errorf("Expected p-time-3 to be marked isUndated=true")
+	}
+
+	// Verify day grouping: exactly 2 groups (2026-10-24 with 2 photos, and undated with 1 photo)
+	if len(timeResp.Groups) != 2 {
+		t.Fatalf("Expected 2 groups, got %d", len(timeResp.Groups))
+	}
+	if timeResp.Groups[0].Date != "2026-10-24" || len(timeResp.Groups[0].Photos) != 2 {
+		t.Errorf("Unexpected group 0: %+v", timeResp.Groups[0])
+	}
+	if timeResp.Groups[0].IsUndated != false {
+		t.Errorf("Group 0 should not be undated")
+	}
+	if timeResp.Groups[1].Date != "undated" || len(timeResp.Groups[1].Photos) != 1 || !timeResp.Groups[1].IsUndated {
+		t.Errorf("Unexpected group 1 (undated): %+v", timeResp.Groups[1])
+	}
+
+	// 2. Cursor pagination on timeline: limit=2
+	reqPage1 := httptest.NewRequest("GET", "/api/timeline?limit=2&offset=0", nil)
+	respPage1, _ := app.Test(reqPage1, -1)
+	bodyPage1, _ := io.ReadAll(respPage1.Body)
+	var timePage1 api.TimelineResponse
+	_ = json.Unmarshal(bodyPage1, &timePage1)
+
+	if !timePage1.HasMore || timePage1.NextCursor == "" {
+		t.Errorf("Expected hasMore=true and nextCursor on page 1")
+	}
+
+	// Fetch page 2 using cursor
+	reqPage2 := httptest.NewRequest("GET", "/api/timeline?cursor="+timePage1.NextCursor+"&limit=2", nil)
+	respPage2, _ := app.Test(reqPage2, -1)
+	bodyPage2, _ := io.ReadAll(respPage2.Body)
+	var timePage2 api.TimelineResponse
+	_ = json.Unmarshal(bodyPage2, &timePage2)
+
+	if len(timePage2.Photos) != 1 || timePage2.Photos[0].ID != "p-time-3" {
+		t.Errorf("Unexpected photos on cursor page 2: %+v", timePage2.Photos)
+	}
+
+	// 3. GET /api/photos/:id with adjacent navigation context (timeline)
+	reqAdj := httptest.NewRequest("GET", "/api/photos/p-time-2?collectionType=timeline", nil)
+	respAdj, _ := app.Test(reqAdj, -1)
+	bodyAdj, _ := io.ReadAll(respAdj.Body)
+	var pAdj api.PhotoResponse
+	_ = json.Unmarshal(bodyAdj, &pAdj)
+
+	if pAdj.PrevID == nil || *pAdj.PrevID != "p-time-1" {
+		t.Errorf("Expected prevId 'p-time-1', got %v", pAdj.PrevID)
+	}
+	if pAdj.NextID == nil || *pAdj.NextID != "p-time-3" {
+		t.Errorf("Expected nextId 'p-time-3', got %v", pAdj.NextID)
+	}
+
+	// 4. Verify relative folder path in PhotoResponse (never absolute server path)
+	if pAdj.Folder != "originals" {
+		t.Errorf("Expected relative folder 'originals', got %q", pAdj.Folder)
 	}
 }

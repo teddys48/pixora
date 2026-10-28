@@ -3,6 +3,7 @@ import {
   Photo,
   PhotoResponse,
   PhotoListResponse,
+  TimelineResponse,
   ScanStatus,
   UploadResponse,
 } from '@/types/photo'
@@ -22,11 +23,22 @@ export function toFrontendPhoto(p: PhotoResponse): Photo {
     thumbnailUrl: p.thumbnailUrl,
     date: date,
     takenAt: p.takenAt,
+    fileModifiedAt: p.fileModifiedAt,
+    isUndated: p.isUndated ?? (p.takenAt ? false : true),
     size: p.fileSize,
+    folder: p.folder,
     metadata: {
       width: p.width || 0,
       height: p.height || 0,
+      camera: p.exif?.camera,
+      lens: p.exif?.lens,
+      focalLength: p.exif?.focalLength,
+      aperture: p.exif?.aperture,
+      shutterSpeed: p.exif?.shutterSpeed,
+      iso: p.exif?.iso,
     },
+    prevId: p.prevId,
+    nextId: p.nextId,
   }
 }
 
@@ -86,8 +98,81 @@ export async function fetchPhotos(
   }
 }
 
-export async function fetchPhoto(id: string, signal?: AbortSignal): Promise<Photo> {
-  const response = await fetch(`${API_BASE_URL}/photos/${encodeURIComponent(id)}`, {
+export interface FetchTimelineOptions {
+  limit?: number
+  offset?: number
+  cursor?: string
+}
+
+export interface TimelineData {
+  photos: Photo[]
+  groups: {
+    date: string
+    label: string
+    year?: number
+    month?: string
+    day?: number
+    isUndated: boolean
+    photos: Photo[]
+  }[]
+  total: number
+  limit: number
+  offset: number
+  nextCursor?: string
+  hasMore: boolean
+}
+
+export async function fetchTimeline(
+  options: FetchTimelineOptions = {},
+  signal?: AbortSignal
+): Promise<TimelineData> {
+  const params = new URLSearchParams()
+  if (options.limit !== undefined) params.set('limit', options.limit.toString())
+  if (options.offset !== undefined) params.set('offset', options.offset.toString())
+  if (options.cursor) params.set('cursor', options.cursor)
+
+  const url = `${API_BASE_URL}/timeline${params.toString() ? `?${params.toString()}` : ''}`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch timeline with status ${response.status}`)
+  }
+
+  const data: TimelineResponse = await response.json()
+  return {
+    photos: (data.photos || []).map(toFrontendPhoto),
+    groups: (data.groups || []).map((g) => ({
+      ...g,
+      photos: (g.photos || []).map(toFrontendPhoto),
+    })),
+    total: data.total || 0,
+    limit: data.limit || 50,
+    offset: data.offset || 0,
+    nextCursor: data.nextCursor,
+    hasMore: Boolean(data.hasMore),
+  }
+}
+
+export async function fetchPhoto(
+  id: string,
+  options?: { collectionType?: string; collectionId?: string },
+  signal?: AbortSignal
+): Promise<Photo> {
+  const params = new URLSearchParams()
+  if (options?.collectionType) params.set('collectionType', options.collectionType)
+  if (options?.collectionId) params.set('collectionId', options.collectionId)
+
+  const url = `${API_BASE_URL}/photos/${encodeURIComponent(id)}${
+    params.toString() ? `?${params.toString()}` : ''
+  }`
+  const response = await fetch(url, {
     method: 'GET',
     headers: {
       Accept: 'application/json',

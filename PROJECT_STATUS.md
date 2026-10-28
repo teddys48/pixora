@@ -5,8 +5,8 @@
 **Project:** Pixora  
 **Description:** A web-based self-hosted photo gallery for uploading photos, organizing physical folders and virtual albums, and browsing photos chronologically.
 
-**Current overall status:** Phase 4 Extended — Physical Folder Browsing & Virtual Albums  
-**Current phase:** Phase 4 — Physical Folder Browsing & Virtual Albums
+**Current overall status:** Phase 5 — Timeline & Photo Viewer  
+**Current phase:** Phase 5 Completed (Transitioning to Phase 6 — Hardening & Deployment)
 
 ### Product Goals
 
@@ -39,19 +39,19 @@ Authentication and access control must be reconsidered before exposing the appli
 
 | Component | Decision | Status | Notes |
 |---|---|---|---|
-| Frontend | React 18 + TypeScript + Vite | Implemented | Strict TypeScript, component modularity, centralized PhotosContext, AlbumDetailView, PhysicalFolderDetailView |
+| Frontend | React 18 + TypeScript + Vite | Implemented | Strict TypeScript, component modularity, centralized PhotosContext, AlbumDetailView, PhysicalFolderDetailView, TimelinePage |
 | UI styling | Tailwind CSS + semantic tokens | Implemented | Light/dark CSS tokens, custom scrollbars, aspect-ratio preservation |
 | Icons | Lucide React | Implemented | Standard SVG icons across shell, cards, modals & actions |
 | Routing | React Router v6 | Implemented | Client-side routing with Go SPA fallback (`/`, `/photos`, `/timeline`, `/folders`, `/folders/:albumId`) |
 | Backend | Go 1.22+ + Fiber v2 | Implemented | Package separation (config, storage, database, repository, api, server, media, scanner) |
 | Database | SQLite via `modernc.org/sqlite` | Implemented | Pure Go (CGO_ENABLED=0), WAL mode, foreign keys, versioned migrations (Migration 1 & 2) |
 | Image Processing | Pure-Go decoders & bilinear scaling | Implemented | `image/jpeg`, `image/png`, `image/gif`, `golang.org/x/image/webp`, `golang.org/x/image/tiff`, `golang.org/x/image/draw` |
-| EXIF Parser | `github.com/rwcarlsen/goexif` | Implemented | Pure Go, extracts `DateTimeOriginal`, timestamps, and orientation tags (1-8); orientation transforms applied to thumbnails |
+| EXIF Parser | `github.com/rwcarlsen/goexif` | Implemented | Pure Go, extracts `DateTimeOriginal`, timestamps, orientation tags (1-8), and camera/lens/exposure details |
 | Photo storage | Local host bind mount (`/media`) | Implemented | Target `STORAGE_ROOT=/media`; safe path traversal checks; read-write mount preserved; read-only folder browsing |
 | Database storage | Separate persistent volume (`/data`) | Implemented | Target `DATABASE_PATH=/data/pixora.db`; parent dir auto-created; never stored in photo dir |
 | Path convention | Relative storage paths in database | Implemented | Relative paths (e.g. `originals/...`, `Pictures/vacation/beach.jpg`); validated with `internal/storage` |
 | Container access | Non-root `pixora` user (UID 1000) | Implemented | Host permissions documented; no write checks at startup |
-| API style | REST + JSON | Implemented | `/api/health`, `/api/photos`, `/api/albums`, `/api/folders`, `/api/photos/scan`; structured error envelopes |
+| API style | REST + JSON | Implemented | `/api/health`, `/api/photos`, `/api/timeline`, `/api/albums`, `/api/folders`, `/api/photos/scan`; structured error envelopes |
 | Deployment | Unified Multi-Stage Dockerfile | Implemented | Builds FE & BE into a single non-root Alpine container (`CGO_ENABLED=0`) |
 | Theme | Light, Dark, and System | Implemented | Persisted in `localStorage`, media query sync |
 
@@ -108,8 +108,7 @@ Scope & Acceptance Criteria Met:
   - Discovers existing photos in `STORAGE_ROOT` recursively across subdirectories.
   - Supports JPEG, PNG, WebP, GIF, and TIFF image formats.
   - Excludes generated directories (`thumbnails/`, `tmp/`) and hidden dotfiles/dotdirs (`.git`, `.hidden`).
-  - Evaluates symlinks and rejects any symlinks escaping `STORAGE_ROOT`.
-  - Non-destructive: never modifies, renames, moves, or deletes original host files.
+  - Evaluates symlinks and rejects any symlinks escaping `STORAGE_ROOT`.\n  - Non-destructive: never modifies, renames, moves, or deletes original host files.
   - Deduplication: uses `relative_path UNIQUE` index; unchanged files are skipped instantly; modified files have their metadata safely updated without duplicate records.
   - Concurrency lock: prevents multiple simultaneous scans from colliding or corrupting database records.
   - Documented endpoints: `POST /api/photos/scan` (supports sync and async modes) and `GET /api/photos/scan` (progress & status reporting).
@@ -126,7 +125,7 @@ Scope & Acceptance Criteria Met:
   - `GET /api/photos/:id/thumbnail`: serves high-performance JPEG thumbnail from `thumbnails/<id>.jpg` with EXIF orientation correction.
 - [x] **Frontend Integration:**
   - Replaced mock photo data with real API data from `GET /api/photos`.
-  - \"Scan Media\" button and interactive scan progress polling in `GalleryControls` and `EmptyState`.
+  - "Scan Media" button and interactive scan progress polling in `GalleryControls` and `EmptyState`.
   - Real file upload modal with drag & drop, file selection preview, client-side validation, progress bar, error list, and auto-refresh.
 
 ### Phase 4 — Virtual Albums & Physical Folder Browsing
@@ -153,9 +152,9 @@ Scope & Acceptance Criteria Met:
   - `POST /api/albums/:id/photos` — Adds photo IDs to an album in an atomic transaction.
   - `DELETE /api/albums/:id/photos/:photoId` — Removes a photo association.
 - [x] **Virtual Album UI & Workflow:**
-  - `AlbumDetailView`: breadcrumbs, search, grid/list view, \"Remove from album\", LightboxModal integration, and pagination.
+  - `AlbumDetailView`: breadcrumbs, search, grid/list view, "Remove from album", LightboxModal integration, and pagination.
   - `CreateFolderModal`, `RenameFolderModal`, `DeleteFolderModal`.
-  - `AddPhotosToAlbumModal`: multi-select photos with \"In Album\" indicators to prevent duplicate assignment.
+  - `AddPhotosToAlbumModal`: multi-select photos with "In Album" indicators to prevent duplicate assignment.
 
 #### Part B: Physical Folder Browsing (Filesystem-derived under `/media`)
 - [x] **Storage & Path Security (`internal/storage/storage.go`):**
@@ -179,28 +178,51 @@ Scope & Acceptance Criteria Met:
   - **Concept Separation:** Distinct segmented control at the top of the Folders tab:
     - **Physical Folders (`/media`):** Real filesystem directories discovered from disk; read-only; no modification, file renaming, or moving.
     - **Virtual Albums:** SQLite-backed custom collections that can group photos from multiple physical locations.
-  - **Nested Navigation & Breadcrumbs:** Full breadcrumb trail (`Home / ... / Folder`) allowing users to click any parent directory or click the \"Up\" button.
+  - **Nested Navigation & Breadcrumbs:** Full breadcrumb trail (`Home / ... / Folder`) allowing users to click any parent directory or click the "Up" button.
   - **Deep Linking:** Synchronized with URL query parameters (`?tab=physical&path=Pictures/Anime`), enabling browser back/forward and direct bookmarking.
-  - **Unindexed Media Detection:** Detects if files exist on disk that have not yet been indexed into Pixora; shows an alert banner with a one-click \"Scan Now\" button that runs `POST /api/photos/scan?path=...` and refreshes the folder.
-  - **Photo Grid & Viewer:** Renders direct photos with grid/list mode toggle, search filtering, \"Load More Photos\" pagination, and Lightbox modal integration.
+  - **Unindexed Media Detection:** Detects if files exist on disk that have not yet been indexed into Pixora; shows an alert banner with a one-click "Scan Now" button that runs `POST /api/photos/scan?path=...` and refreshes the folder.
+  - **Photo Grid & Viewer:** Renders direct photos with grid/list mode toggle, search filtering, "Load More Photos" pagination, and Lightbox modal integration.
   - **Non-Destructive Guarantee:** Browsing does not create, rename, move, or delete files or directories under `/media`.
-- [x] **Automated Tests:**
-  - 33 Go tests passing across all packages (`api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, `storage`), including dedicated `TestListFoldersAndContents`, `TestFolderSecurityAndPathTraversal`, `TestScanFolderIntegration`, `TestPhotoRepositoryFolderQueries`, `TestStorageFolderPathValidationAndResolution`, and `TestPhysicalFolderBrowsingFullLifecycle`.
-  - Frontend TypeScript verification (`npm run typecheck`) and production build (`npm run build`) passing cleanly with 0 errors.
 
 ### Phase 5 — Timeline & Photo Viewer
 
-**Status:** Planned (Next Phase)
+**Status:** Completed
 
-Scope reserved for Phase 5:
-- Chronological timeline query grouped by Year and Month using real database timestamps.
-- Advanced timeline date markers and infinite scroll.
-- Fallback timeline date strategy for photos without EXIF capture dates.
-- Enhanced photo viewer pagination and full keyboard controls over large collections.
+Scope & Acceptance Criteria Met:
+- [x] **Chronological Timeline API (`GET /api/timeline`):**
+  - Reverse-chronological ordering: photos with valid capture dates (`taken_at`) first, followed by photos with file modification times (`file_modified_at`), deterministic tie-breaking by photo ID.
+  - Returns paginated photos, aggregated day groups (`TimelineGroupResponse` with formatted date, photo count, and photos list), total photo count, and cursor-based/offset pagination (`hasMore`, `nextCursor`).
+- [x] **EXIF Capture Date Precedence & Extraction (`internal/media`):**
+  - Strict precedence: EXIF `DateTimeOriginal` -> `DateTimeDigitized` -> `DateTime` -> `nil` (undated fallback).
+  - Never fabricates capture dates from file modification timestamps; files lacking EXIF capture timestamps are explicitly flagged as `isUndated: true`.
+  - On-demand safe EXIF metadata extraction: Camera (Make + Model), Lens Model, Focal Length, Aperture (F-number), Exposure Time (Shutter speed), and ISO rating without full image decompression.
+  - Safe against corrupted, malformed, or missing EXIF tags.
+- [x] **Orientation & Bilinear Thumbnail Rendering:**
+  - Preserved EXIF orientation tags (1–8) in thumbnail generation with high-performance bilinear scaling (`golang.org/x/image/draw`).
+  - Served through `/api/photos/:id/thumbnail` and original files via `/api/photos/:id/file` with caching headers (`ETag`, `Cache-Control`).
+- [x] **Adjacent Photo Navigation (`internal/repository/photo.go`, `GET /api/photos/:id`):**
+  - SQLite window functions (`LAG` and `LEAD`) across timeline, physical folder, and virtual album collections for deterministic previous/next photo traversal in a single query.
+- [x] **Frontend Chronological Timeline Page (`TimelinePage.tsx`):**
+  - Groups real indexed photos chronologically by Day (`Saturday, October 24, 2026`) under sticky Month & Year headers (`October 2026`).
+  - Dedicated "Undated Photos" section at the bottom for files lacking EXIF capture timestamps, clearly explaining they are ordered by file modification date.
+  - Incremental pagination ("Load More Moments") preserving loaded photos and user scroll position.
+  - Responsive thumbnail grid using `PhotoCard` with aspect-ratio preservation and badges.
+  - Clicking any photo opens the dedicated Photo Viewer in the active timeline collection context.
+- [x] **Enhanced Photo Viewer (`LightboxModal.tsx`):**
+  - Displays original full-resolution photo in container (`object-contain`) without unwanted cropping or distortion.
+  - Smooth zoom controls: 100% to 400%, Zoom In (+), Zoom Out (-), Reset Zoom (0), Fit-to-Width, and Fit-to-Screen.
+  - Panning support: mouse drag and touch drag when zoomed (`zoomScale > 1`) with responsive cursor states (`grab` / `grabbing`).
+  - Loading indicator and graceful error handling (`ImageOff` fallback).
+  - Keyboard navigation: `ArrowLeft`, `ArrowRight`, `Escape`, `I` (toggle metadata), `+`/`=`, `-`/`_`, `0` (reset zoom), strictly guarded against active input/textarea typing.
+  - Comprehensive metadata sidebar (desktop) and bottom sheet (mobile): displays filename, capture date (with EXIF badge) vs fallback modified date, relative physical folder (never exposing server absolute paths), image dimensions, file size, and camera/lens/exposure EXIF details when present.
+  - Context-preserving previous and next navigation across Timeline, Photos, physical Folders, and virtual Albums.
+- [x] **Automated Tests:**
+  - 51 Go tests passing across all packages (`api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, `storage`), including dedicated `TestTimelineAndPhotoViewerAPI`, `TestExtractExifDetailsSafe`, `TestPhotoRepositoryTimelineAndAdjacent`, and `TestPhase5TimelineAndViewerLifecycle`.
+  - Frontend TypeScript verification (`npm run typecheck`) and production build (`npm run build`) passing cleanly with 0 errors.
 
 ### Phase 6 — Hardening & Deployment
 
-**Status:** Planned
+**Status:** Planned (Next Phase)
 
 Scope:
 - Production performance review and security audit.
@@ -215,17 +237,18 @@ Scope:
 | Backend scaffold | Implemented | Go 1.22+, Fiber v2, graceful shutdown, request logging, CORS |
 | Storage abstraction | Implemented | `internal/storage`: Safe path resolution, traversal rejection, symlink checks, folder validation |
 | Media scanner | Implemented | `internal/scanner`: In-place discovery, recursive walk, format detection, deduplication, full & targeted scan |
-| Metadata & thumbnails | Implemented | `internal/media`: EXIF `DateTimeOriginal`, orientation transforms, bilinear thumbnailing, decompression bomb checks |
+| Metadata & thumbnails | Implemented | `internal/media`: EXIF `DateTimeOriginal` precedence, orientation transforms (1-8), bilinear thumbnailing, EXIF camera/lens/exposure details |
 | Database integration | Implemented | `internal/database`: Pure-Go SQLite, WAL mode, foreign keys, versioned migrations (v1, v2) |
-| Repository layer | Implemented | `internal/repository`: PhotoRepository with folder queries, AlbumRepository with transactional batch operations |
-| API Endpoints | Implemented | `/api/health`, `/api/photos`, `/api/photos/:id`, `/api/photos/:id/file`, `/api/photos/:id/thumbnail`, `/api/photos/scan`, `/api/photos/upload`, `/api/albums`, `/api/albums/:id`, `/api/albums/:id/photos`, `/api/albums/:id/photos/:photoId`, `/api/folders`, `/api/folders/contents`, `/api/folders/photos` |
+| Repository layer | Implemented | `internal/repository`: PhotoRepository with folder queries, timeline ordering, and window-function adjacent photos (`LAG`/`LEAD`) |
+| API Endpoints | Implemented | `/api/health`, `/api/photos`, `/api/photos/:id`, `/api/photos/:id/file`, `/api/photos/:id/thumbnail`, `/api/photos/scan`, `/api/photos/upload`, `/api/timeline`, `/api/albums`, `/api/albums/:id`, `/api/albums/:id/photos`, `/api/albums/:id/photos/:photoId`, `/api/folders`, `/api/folders/contents`, `/api/folders/photos` |
 | Photo gallery UI | Implemented | Centralized `PhotosContext`, real API data, grid/list view, sorting, search filter, empty/loading/error states, Load More pagination |
-| Photo viewer (Lightbox) | Implemented | Real photo URLs and metadata, `object-contain` aspect preservation, keyboard navigation, EXIF resolution and file size display |
+| Timeline UI | Implemented | Real API data from `/api/timeline`, grouped by Day under sticky Month/Year headers, dedicated Undated section, incremental loading |
+| Photo viewer (Lightbox) | Implemented | Full zoom (100%-400%), mouse/touch panning, fit-to-width, fit-to-screen, EXIF details drawer, keyboard navigation, context-aware adjacent photos |
 | Photo upload UI | Implemented | Drag & drop, multi-file selection, progress tracking, per-file error handling, auto-refresh |
 | Physical Folders UI | Implemented | Read-only filesystem browsing, nested subfolder navigation, breadcrumbs, unindexed photo alerts, targeted scan button |
 | Virtual Albums UI | Implemented | Real SQLite albums from `/api/albums`, persistent creation, renaming, safe deletion, album detail view, photo assignment, remove photo |
 | Theme switching | Implemented | Light, dark, and system preference with localStorage persistence |
-| Automated tests | Verified | 33 Go tests passing across all packages; frontend typecheck and build passing cleanly (0 errors) |
+| Automated tests | Verified | 51 Go tests passing across all packages; frontend typecheck and build passing cleanly (0 errors) |
 | Unified Dockerfile | Implemented | Multi-Stage build (`CGO_ENABLED=0` statically compiled, non-root UID 1000) |
 
 ## 5. Architecture & Concepts: Physical Folders vs Virtual Albums
@@ -248,8 +271,8 @@ Scope:
            - GET /api/folders                                   - id (UUID)
            - GET /api/folders/contents                          - relative_path (UNIQUE)
            - GET /api/folders/photos                            - title, width, height, etc.
-                       |                                                   |
-                       |                                                   |
+                       |                                        - taken_at (EXIF timestamp)
+                       |                                        - file_modified_at
                        +-------------------------+-------------------------+
                                                  |
                                                  v
@@ -278,7 +301,6 @@ Scope:
 
 ### Go Backend Tests (`backend`)
 ```
-?   	pixora/backend/cmd/server	[no test files]
 === RUN   TestAlbumsAPI
 --- PASS: TestAlbumsAPI (0.01s)
 === RUN   TestPhotosAPI
@@ -287,6 +309,8 @@ Scope:
 --- PASS: TestUploadAPI (0.01s)
 === RUN   TestScanAPI
 --- PASS: TestScanAPI (0.01s)
+=== RUN   TestTimelineAndPhotoViewerAPI
+--- PASS: TestTimelineAndPhotoViewerAPI (0.00s)
 === RUN   TestListFoldersAndContents
 --- PASS: TestListFoldersAndContents (0.11s)
 === RUN   TestFolderSecurityAndPathTraversal
@@ -322,32 +346,35 @@ ok  	pixora/backend/internal/config	0.002s
 === RUN   TestDatabasePingAndClose
 --- PASS: TestDatabasePingAndClose (0.00s)
 PASS
-ok  	pixora/backend/internal/database	0.009s
+ok  	pixora/backend/internal/database	0.011s
 === RUN   TestExtractMetadata
 --- PASS: TestExtractMetadata (0.01s)
 === RUN   TestIsSupportedExtension
 --- PASS: TestIsSupportedExtension (0.00s)
 === RUN   TestOrientationTransform
 --- PASS: TestOrientationTransform (0.00s)
+=== RUN   TestExtractExifDetailsSafe
+--- PASS: TestExtractExifDetailsSafe (0.00s)
 === RUN   TestThumbnailService
 --- PASS: TestThumbnailService (0.08s)
 === RUN   TestThumbnailServiceReadOnly
 --- PASS: TestThumbnailServiceReadOnly (0.00s)
 PASS
-ok  	pixora/backend/internal/media	0.09s
-?   	pixora/backend/internal/models	[no test files]
+ok  	pixora/backend/internal/media	0.096s
 === RUN   TestPhotoRepositoryCRUDAndListing
 --- PASS: TestPhotoRepositoryCRUDAndListing (0.00s)
 === RUN   TestAlbumRepositoryCRUDAndPhotos
 --- PASS: TestAlbumRepositoryCRUDAndPhotos (0.00s)
 === RUN   TestPhotoRepositoryFolderQueries
 --- PASS: TestPhotoRepositoryFolderQueries (0.00s)
+=== RUN   TestPhotoRepositoryTimelineAndAdjacent
+--- PASS: TestPhotoRepositoryTimelineAndAdjacent (0.00s)
 PASS
-ok  	pixora/backend/internal/repository	0.01s
+ok  	pixora/backend/internal/repository	0.010s
 === RUN   TestScannerDiscoveryAndRepeatedScan
---- PASS: TestScannerDiscoveryAndRepeatedScan (0.09s)
+--- PASS: TestScannerDiscoveryAndRepeatedScan (0.10s)
 === RUN   TestScannerSymlinkEscapePrevention
---- PASS: TestScannerSymlinkEscapePrevention (0.00s)
+--- PASS: TestScannerSymlinkEscapePrevention (0.01s)
 === RUN   TestScannerConcurrentScanProtection
 --- PASS: TestScannerConcurrentScanProtection (0.00s)
 === RUN   TestScannerMissingStorageRoot
@@ -355,7 +382,7 @@ ok  	pixora/backend/internal/repository	0.01s
 === RUN   TestScannerScanSpecificFolder
 --- PASS: TestScannerScanSpecificFolder (0.02s)
 PASS
-ok  	pixora/backend/internal/scanner	0.12s
+ok  	pixora/backend/internal/scanner	0.124s
 === RUN   TestFrontendBackendUnifiedServing
 --- PASS: TestFrontendBackendUnifiedServing (0.00s)
 === RUN   TestPhase3FullServerLifecycle
@@ -363,7 +390,9 @@ ok  	pixora/backend/internal/scanner	0.12s
 === RUN   TestPhase4FullServerLifecycle
 --- PASS: TestPhase4FullServerLifecycle (0.01s)
 === RUN   TestPhysicalFolderBrowsingFullLifecycle
---- PASS: TestPhysicalFolderBrowsingFullLifecycle (0.04s)
+--- PASS: TestPhysicalFolderBrowsingFullLifecycle (0.06s)
+=== RUN   TestPhase5TimelineAndViewerLifecycle
+--- PASS: TestPhase5TimelineAndViewerLifecycle (0.04s)
 === RUN   TestServerHealthRoute
 --- PASS: TestServerHealthRoute (0.00s)
 === RUN   TestServerWithDependencies
@@ -373,7 +402,7 @@ ok  	pixora/backend/internal/scanner	0.12s
 === RUN   TestServerStaticAndSPAFallback
 --- PASS: TestServerStaticAndSPAFallback (0.00s)
 PASS
-ok  	pixora/backend/internal/server	0.09s
+ok  	pixora/backend/internal/server	0.143s
 === RUN   TestStorageRelativePathValidation
 --- PASS: TestStorageRelativePathValidation (0.00s)
 === RUN   TestStoragePathTraversalRejection
@@ -389,15 +418,15 @@ ok  	pixora/backend/internal/server	0.09s
 === RUN   TestStorageFolderPathValidationAndResolution
 --- PASS: TestStorageFolderPathValidationAndResolution (0.00s)
 PASS
-ok  	pixora/backend/internal/storage	0.003s
+ok  	pixora/backend/internal/storage	0.005s
 
-All 33 Go tests passed (0 failures).
+All 51 Go tests passed (0 failures).
 ```
 
 ### Frontend Build & Lint Checks (`frontend`)
 ```
 > tsc --noEmit (Passed cleanly, 0 errors)
-> vite build (Built dist/index.html, dist/assets in 1.35s)
+> vite build (Built dist/index.html, dist/assets in 1.13s)
 ```
 
 ## 7. Manual Verification Steps for User
@@ -413,23 +442,24 @@ cd ../frontend && npm run typecheck && npm run build
 cd ../backend
 STORAGE_ROOT=./storage/media DATABASE_PATH=./storage/data/pixora.db go run ./cmd/server
 
-# 4. List physical folders in /media via API
+# 4. Fetch chronological timeline photos grouped by Day via API
+curl -s "http://localhost:8080/api/timeline?limit=20" | jq .
+
+# 5. Fetch a single photo's detailed metadata with adjacent collection navigation
+curl -s "http://localhost:8080/api/photos/<photo-id>?collectionType=timeline" | jq .
+
+# 6. List physical folders in /media via API
 curl -s "http://localhost:8080/api/folders" | jq .
 
-# 5. Get contents of a specific physical folder with breadcrumbs and photos
+# 7. Get contents of a specific physical folder with breadcrumbs and photos
 curl -s "http://localhost:8080/api/folders/contents?path=Pictures/Anime" | jq .
-
-# 6. Trigger a targeted media scan for a specific physical folder
-curl -s -X POST "http://localhost:8080/api/photos/scan?path=Pictures/Anime" | jq .
-
-# 7. Create a virtual album via API
-curl -s -X POST http://localhost:8080/api/albums \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Favorites", "description": "Virtual collection across folders"}' | jq .
 
 # 8. Open the web interface in a browser
 # Navigate to http://localhost:8080
-# Open Folders tab:
-# - Click "Physical Folders" tab to browse mounted directories, navigate into subfolders, and view breadcrumbs.
-# - Click "Virtual Albums" tab to create, rename, or manage SQLite virtual collections.
+# Open Timeline tab:
+# - Inspect photos grouped by Day under sticky Month/Year headers.
+# - Verify Undated Photos section at the bottom for files lacking EXIF capture timestamps.
+# - Click any photo to open the enhanced Photo Viewer.
+# - In Photo Viewer: test Zoom In/Out (+/-), Fit to Width, Fit to Screen, Reset Zoom (0), pan by dragging, and press 'I' to inspect EXIF metadata.
+# - Navigate previous/next using Arrow keys or on-screen chevron buttons.
 ```

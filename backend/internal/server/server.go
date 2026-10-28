@@ -107,6 +107,11 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 		apiGroup.Get("/folders", api.ListFoldersHandler(deps.Storage, deps.PhotoRepo))
 	}
 
+	// Timeline routes
+	if deps.PhotoRepo != nil {
+		apiGroup.Get("/timeline", api.TimelineHandler(deps.PhotoRepo))
+	}
+
 	// Photo Collection and Upload routes
 	if deps.PhotoRepo != nil {
 		apiGroup.Get("/photos", api.ListPhotosHandler(deps.PhotoRepo))
@@ -123,10 +128,12 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 
 	// Individual Photo and Asset Serving routes
 	if deps.PhotoRepo != nil {
-		apiGroup.Get("/photos/:id", api.GetPhotoHandler(deps.PhotoRepo))
 		if deps.Storage != nil {
+			apiGroup.Get("/photos/:id", api.GetPhotoHandler(deps.PhotoRepo, deps.Storage))
 			apiGroup.Get("/photos/:id/file", api.ServeOriginalPhotoHandler(deps.PhotoRepo, deps.Storage))
 			apiGroup.Get("/photos/:id/thumbnail", api.ServeThumbnailHandler(deps.PhotoRepo, deps.Storage, deps.Thumbnail))
+		} else {
+			apiGroup.Get("/photos/:id", api.GetPhotoHandler(deps.PhotoRepo))
 		}
 	}
 

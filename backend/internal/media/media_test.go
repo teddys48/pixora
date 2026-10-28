@@ -143,6 +143,28 @@ func TestOrientationTransform(t *testing.T) {
 	}
 }
 
+func TestExtractExifDetailsSafe(t *testing.T) {
+	// 1. Plain image without EXIF returns nil details without error
+	jpgData := createTestJPEG(100, 100)
+	details, err := media.ExtractExifDetails(bytes.NewReader(jpgData))
+	if err != nil {
+		t.Fatalf("ExtractExifDetails on non-EXIF jpeg failed: %v", err)
+	}
+	if details != nil && (details.Camera != "" || details.ISO != nil) {
+		t.Errorf("Expected empty details on non-EXIF image, got %+v", details)
+	}
+
+	// 2. Corrupt data returns nil or error safely without panic
+	corrupt := []byte{0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x10, 'E', 'x', 'i', 'f', 0x00, 0x00}
+	_, _ = media.ExtractExifDetails(bytes.NewReader(corrupt))
+
+	// 3. ParseEXIFSafe on empty slice
+	takenAt, orient := media.ParseEXIFSafe(nil)
+	if takenAt != nil || orient != 1 {
+		t.Errorf("Expected nil and 1 for empty slice, got %v, %d", takenAt, orient)
+	}
+}
+
 func TestThumbnailService(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "pixora_thumb_test_*")
 	if err != nil {

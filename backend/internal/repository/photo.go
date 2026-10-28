@@ -25,6 +25,8 @@ type PhotoRepository interface {
 	ListByFolder(ctx context.Context, folderPath string, offset, limit int, sortBy, order string) ([]models.Photo, int, error)
 	CountByFolder(ctx context.Context, folderPath string, recursive bool) (int, error)
 	GetFolderCoverPhoto(ctx context.Context, folderPath string) (*models.Photo, error)
+	ListTimeline(ctx context.Context, offset, limit int) ([]models.Photo, int, error)
+	GetAdjacentPhotos(ctx context.Context, id string, collectionType string, collectionID string) (prevID *string, nextID *string, err error)
 }
 
 // SQLitePhotoRepository implements PhotoRepository using SQLite.
@@ -406,4 +408,150 @@ LIMIT 1`
 	}
 
 	return &p, nil
+}
+
+// ListTimeline returns a paginated list of photos ordered chronologically:
+// 1. Photos with a verified capture date (taken_at IS NOT NULL) sorted descending (newest capture date first)
+// 2. Photos without capture dates (taken_at IS NULL) sorted by file_modified_at descending as fallback
+// Consistent deterministic sorting is ensured via tie-breaker (id ASC).
+func (r *SQLitePhotoRepository) ListTimeline(ctx context.Context, offset, limit int) ([]models.Photo, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM photos").Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count photos for timeline: %w", err)
+	}
+
+	query := `
+SELECT id, relative_path, original_filename, media_type, file_size,
+       width, height, taken_at, file_modified_at, created_at, updated_at
+FROM photos
+ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC,
+         taken_at DESC,
+         file_modified_at DESC,
+         id ASC
+LIMIT ? OFFSET ?`
+
+	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query timeline photos: %w", err)
+	}
+	defer rows.Close()
+
+	photos := make([]models.Photo, 0, limit)
+	for rows.Next() {
+		var p models.Photo
+		if err := rows.Scan(
+			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
+			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan timeline photo: %w", err)
+		}
+		photos = append(photos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error during timeline photos iteration: %w", err)
+	}
+
+	return photos, total, nil
+}
+
+// GetAdjacentPhotos returns previous and next photo IDs relative to photoID within the specified collection context.
+// collectionType can be: "timeline", "folder", "album", or empty/default (all photos).
+func (r *SQLitePhotoRepository) GetAdjacentPhotos(ctx context.Context, id string, collectionType string, collectionID string) (prevID *string, nextID *string, err error) {
+	var query string
+	var args []interface{}
+
+	switch collectionType {
+	case "album":
+		query = `
+WITH ordered AS (
+    SELECT p.id,
+           LAG(p.id) OVER (ORDER BY pa.added_at DESC, p.id ASC) AS prev_id,
+           LEAD(p.id) OVER (ORDER BY pa.added_at DESC, p.id ASC) AS next_id
+    FROM photos p
+    INNER JOIN photo_albums pa ON pa.photo_id = p.id
+    WHERE pa.album_id = ?
+)
+SELECT prev_id, next_id FROM ordered WHERE id = ?`
+		args = []interface{}{collectionID, id}
+
+	case "folder":
+		normPath := cleanFolderPath(collectionID)
+		if normPath == "" {
+			query = `
+WITH ordered AS (
+    SELECT id,
+           LAG(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS prev_id,
+           LEAD(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS next_id
+    FROM photos
+    WHERE INSTR(relative_path, '/') = 0
+)
+SELECT prev_id, next_id FROM ordered WHERE id = ?`
+			args = []interface{}{id}
+		} else {
+			prefix := normPath + "/"
+			query = `
+WITH ordered AS (
+    SELECT id,
+           LAG(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS prev_id,
+           LEAD(id) OVER (ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC) AS next_id
+    FROM photos
+    WHERE SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0
+)
+SELECT prev_id, next_id FROM ordered WHERE id = ?`
+			args = []interface{}{len(prefix), prefix, len(prefix) + 1, id}
+		}
+
+	case "timeline":
+		fallthrough
+	default:
+		query = `
+WITH ordered AS (
+    SELECT id,
+           LAG(id) OVER (
+               ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC,
+                        taken_at DESC,
+                        file_modified_at DESC,
+                        id ASC
+           ) AS prev_id,
+           LEAD(id) OVER (
+               ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC,
+                        taken_at DESC,
+                        file_modified_at DESC,
+                        id ASC
+           ) AS next_id
+    FROM photos
+)
+SELECT prev_id, next_id FROM ordered WHERE id = ?`
+		args = []interface{}{id}
+	}
+
+	var pID, nID sql.NullString
+	err = r.db.QueryRowContext(ctx, query, args...).Scan(&pID, &nID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, fmt.Errorf("failed to query adjacent photos: %w", err)
+	}
+
+	if pID.Valid && pID.String != "" {
+		s := pID.String
+		prevID = &s
+	}
+	if nID.Valid && nID.String != "" {
+		s := nID.String
+		nextID = &s
+	}
+
+	return prevID, nextID, nil
 }
