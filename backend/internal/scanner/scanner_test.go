@@ -82,21 +82,6 @@ func TestScannerDiscoveryAndRepeatedScan(t *testing.T) {
 	store, repo, mediaDir, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	// Create nested directory structure with images and non-images
-	// media/
-	//   vacation/
-	//     beach.jpg
-	//     2026/
-	//       mountains.png
-	//   thumbnails/
-	//     cached_thumb.jpg   (MUST BE EXCLUDED)
-	//   tmp/
-	//     scratch.jpg        (MUST BE EXCLUDED)
-	//   .hidden/
-	//     secret.jpg         (MUST BE EXCLUDED)
-	//   notes.txt            (MUST BE EXCLUDED)
-	//   corrupt.jpg          (FAILED COUNT)
-
 	vacationDir := filepath.Join(mediaDir, "vacation", "2026")
 	thumbDir := filepath.Join(mediaDir, "thumbnails")
 	tmpDir := filepath.Join(mediaDir, "tmp")
@@ -127,15 +112,12 @@ func TestScannerDiscoveryAndRepeatedScan(t *testing.T) {
 	if status.Status != "completed" {
 		t.Errorf("Expected status completed, got %s", status.Status)
 	}
-	// Scanned candidate images: beach.jpg, mountains.png, corrupt.jpg = 3
 	if status.Scanned != 3 {
 		t.Errorf("Expected scanned=3, got %d", status.Scanned)
 	}
-	// Indexed: beach.jpg, mountains.png = 2
 	if status.Indexed != 2 {
 		t.Errorf("Expected indexed=2, got %d", status.Indexed)
 	}
-	// Failed: corrupt.jpg = 1
 	if status.Failed != 1 {
 		t.Errorf("Expected failed=1, got %d", status.Failed)
 	}
@@ -178,7 +160,6 @@ func TestScannerDiscoveryAndRepeatedScan(t *testing.T) {
 	}
 
 	// --- 3. Update existing file on disk and re-scan ---
-	// Wait a moment so mod time changes
 	time.Sleep(50 * time.Millisecond)
 	_ = os.WriteFile(filepath.Join(mediaDir, "vacation", "beach.jpg"), createTestJPEG(1024, 768), 0644)
 
@@ -203,7 +184,6 @@ func TestScannerSymlinkEscapePrevention(t *testing.T) {
 	store, repo, mediaDir, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	// Create an external directory outside mediaDir
 	outsideDir, err := os.MkdirTemp("", "pixora_outside_*")
 	if err != nil {
 		t.Fatalf("Failed to create outside dir: %v", err)
@@ -213,7 +193,6 @@ func TestScannerSymlinkEscapePrevention(t *testing.T) {
 	outsidePhoto := filepath.Join(outsideDir, "external.jpg")
 	_ = os.WriteFile(outsidePhoto, createTestJPEG(400, 300), 0644)
 
-	// Create symlink inside mediaDir pointing outside
 	linkPath := filepath.Join(mediaDir, "escaping_link.jpg")
 	if err := os.Symlink(outsidePhoto, linkPath); err != nil {
 		t.Skip("Symlinks not supported on this platform/filesystem")
@@ -225,7 +204,6 @@ func TestScannerSymlinkEscapePrevention(t *testing.T) {
 		t.Fatalf("Scan failed: %v", err)
 	}
 
-	// Escaping symlink should be ignored
 	if status.Indexed != 0 {
 		t.Errorf("Expected 0 indexed for escaping symlink, got %d", status.Indexed)
 	}
@@ -241,7 +219,6 @@ func TestScannerConcurrentScanProtection(t *testing.T) {
 
 	s := scanner.New(store, repo)
 
-	// Run first scan
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -253,7 +230,6 @@ func TestScannerConcurrentScanProtection(t *testing.T) {
 		t.Errorf("Expected completed, got %s", status1.Status)
 	}
 
-	// Scanner status check
 	st := s.Status()
 	if st.Status != "completed" {
 		t.Errorf("Expected status 'completed', got %s", st.Status)
@@ -273,5 +249,75 @@ func TestScannerMissingStorageRoot(t *testing.T) {
 	}
 	if status.Status != "failed" {
 		t.Errorf("Expected status 'failed', got %s", status.Status)
+	}
+}
+
+func TestScannerScanSpecificFolder(t *testing.T) {
+	store, repo, mediaDir, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	vacationDir := filepath.Join(mediaDir, "Vacation")
+	wallpapersDir := filepath.Join(mediaDir, "Wallpapers")
+	_ = os.MkdirAll(vacationDir, 0755)
+	_ = os.MkdirAll(wallpapersDir, 0755)
+
+	_ = os.WriteFile(filepath.Join(vacationDir, "beach.jpg"), createTestJPEG(640, 480), 0644)
+	_ = os.WriteFile(filepath.Join(wallpapersDir, "nature.png"), createTestPNG(800, 600), 0644)
+
+	s := scanner.New(store, repo)
+	ctx := context.Background()
+
+	// 1. Scan only "Vacation" folder
+	status, err := s.ScanPath(ctx, "Vacation")
+	if err != nil {
+		t.Fatalf("ScanPath('Vacation') failed: %v", err)
+	}
+	if status.Indexed != 1 || status.Scanned != 1 {
+		t.Errorf("Expected indexed=1, scanned=1; got indexed=%d, scanned=%d", status.Indexed, status.Scanned)
+	}
+
+	// Verify only Vacation photo is in repo
+	total, err := repo.Count(ctx)
+	if err != nil || total != 1 {
+		t.Errorf("Expected 1 photo in repo, got %d", total)
+	}
+	pVac, err := repo.GetByRelativePath(ctx, "Vacation/beach.jpg")
+	if err != nil || pVac == nil {
+		t.Errorf("Expected 'Vacation/beach.jpg' in repo, got err: %v", err)
+	}
+
+	// 2. Re-scan "Vacation": must skip, NO duplicate records
+	statusRepeat, err := s.ScanPath(ctx, "Vacation")
+	if err != nil {
+		t.Fatalf("Repeat ScanPath('Vacation') failed: %v", err)
+	}
+	if statusRepeat.Skipped != 1 || statusRepeat.Indexed != 0 {
+		t.Errorf("Expected skipped=1, indexed=0 on repeat; got skipped=%d, indexed=%d", statusRepeat.Skipped, statusRepeat.Indexed)
+	}
+	totalAfter, _ := repo.Count(ctx)
+	if totalAfter != 1 {
+		t.Errorf("Expected repo count to remain 1 after repeat scan, got %d", totalAfter)
+	}
+
+	// 3. Scan "Wallpapers" folder
+	statusWall, err := s.ScanPath(ctx, "Wallpapers")
+	if err != nil {
+		t.Fatalf("ScanPath('Wallpapers') failed: %v", err)
+	}
+	if statusWall.Indexed != 1 {
+		t.Errorf("Expected indexed=1 for wallpapers, got %d", statusWall.Indexed)
+	}
+	totalFinal, _ := repo.Count(ctx)
+	if totalFinal != 2 {
+		t.Errorf("Expected 2 photos in repo after scanning both folders, got %d", totalFinal)
+	}
+
+	// 4. Scanning invalid / traversal path must fail safely
+	statusBad, err := s.ScanPath(ctx, "../outside")
+	if err == nil {
+		t.Errorf("Expected error when scanning path traversal, got nil")
+	}
+	if statusBad.Status != "failed" {
+		t.Errorf("Expected status 'failed' for path traversal, got %s", statusBad.Status)
 	}
 }

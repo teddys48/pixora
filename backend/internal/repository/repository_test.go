@@ -359,3 +359,107 @@ func TestAlbumRepositoryCRUDAndPhotos(t *testing.T) {
 		t.Errorf("Deleting album must NOT delete original photo records, got err: %v", err)
 	}
 }
+
+func TestPhotoRepositoryFolderQueries(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := repository.NewSQLitePhotoRepository(db)
+	ctx := context.Background()
+
+	t1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+	t4 := time.Date(2026, 1, 4, 10, 0, 0, 0, time.UTC)
+	t5 := time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)
+	t6 := time.Date(2026, 1, 6, 10, 0, 0, 0, time.UTC)
+	t7 := time.Date(2026, 1, 7, 10, 0, 0, 0, time.UTC)
+
+	photos := []*models.Photo{
+		{ID: "p-root-1", RelativePath: "root1.jpg", OriginalFilename: "root1.jpg", MediaType: "image/jpeg", FileSize: 100, TakenAt: &t1},
+		{ID: "p-root-2", RelativePath: "root2.jpg", OriginalFilename: "root2.jpg", MediaType: "image/jpeg", FileSize: 200, TakenAt: &t2},
+		{ID: "p-pic-1", RelativePath: "Pictures/pic1.jpg", OriginalFilename: "pic1.jpg", MediaType: "image/jpeg", FileSize: 300, TakenAt: &t3},
+		{ID: "p-anime-1", RelativePath: "Pictures/Anime/anime1.jpg", OriginalFilename: "anime1.jpg", MediaType: "image/jpeg", FileSize: 400, TakenAt: &t4},
+		{ID: "p-anime-2", RelativePath: "Pictures/Anime/anime2.jpg", OriginalFilename: "anime2.jpg", MediaType: "image/jpeg", FileSize: 500, TakenAt: &t5},
+		{ID: "p-movie-1", RelativePath: "Pictures/Anime/Movies/movie1.jpg", OriginalFilename: "movie1.jpg", MediaType: "image/jpeg", FileSize: 600, TakenAt: &t6},
+		{ID: "p-other-1", RelativePath: "Other/other.jpg", OriginalFilename: "other.jpg", MediaType: "image/jpeg", FileSize: 700, TakenAt: &t7},
+	}
+
+	for _, p := range photos {
+		if err := repo.Create(ctx, p); err != nil {
+			t.Fatalf("Failed to create photo %s: %v", p.ID, err)
+		}
+	}
+
+	// 1. Root folder photos (direct)
+	rootList, rootTotal, err := repo.ListByFolder(ctx, "", 0, 10, "date", "desc")
+	if err != nil {
+		t.Fatalf("ListByFolder(root) failed: %v", err)
+	}
+	if rootTotal != 2 || len(rootList) != 2 {
+		t.Errorf("Expected 2 direct photos in root, got total=%d, len=%d", rootTotal, len(rootList))
+	}
+	if rootList[0].ID != "p-root-2" || rootList[1].ID != "p-root-1" {
+		t.Errorf("Root list ordering mismatch: got %+v", rootList)
+	}
+
+	// 2. Direct photos in "Pictures" (should only contain pic1.jpg, not anime1 or movie1)
+	picList, picTotal, err := repo.ListByFolder(ctx, "Pictures", 0, 10, "date", "desc")
+	if err != nil {
+		t.Fatalf("ListByFolder('Pictures') failed: %v", err)
+	}
+	if picTotal != 1 || len(picList) != 1 || picList[0].ID != "p-pic-1" {
+		t.Errorf("Expected 1 direct photo in Pictures ('p-pic-1'), got total=%d, photos=%+v", picTotal, picList)
+	}
+
+	// 3. Direct photos in "Pictures/Anime" (anime1, anime2, but NOT movie1)
+	animeList, animeTotal, err := repo.ListByFolder(ctx, "Pictures/Anime", 0, 10, "date", "desc")
+	if err != nil {
+		t.Fatalf("ListByFolder('Pictures/Anime') failed: %v", err)
+	}
+	if animeTotal != 2 || len(animeList) != 2 {
+		t.Errorf("Expected 2 direct photos in Anime, got total=%d, len=%d", animeTotal, len(animeList))
+	}
+
+	// 4. Direct photos in "Pictures/Anime/Movies"
+	movieList, movieTotal, err := repo.ListByFolder(ctx, "Pictures/Anime/Movies", 0, 10, "date", "desc")
+	if err != nil {
+		t.Fatalf("ListByFolder('Pictures/Anime/Movies') failed: %v", err)
+	}
+	if movieTotal != 1 || len(movieList) != 1 || movieList[0].ID != "p-movie-1" {
+		t.Errorf("Expected 1 photo in Movies, got total=%d, photos=%+v", movieTotal, movieList)
+	}
+
+	// 5. CountByFolder direct vs recursive
+	directPicCount, err := repo.CountByFolder(ctx, "Pictures", false)
+	if err != nil || directPicCount != 1 {
+		t.Errorf("CountByFolder('Pictures', direct) = %d, err: %v; want 1", directPicCount, err)
+	}
+	recPicCount, err := repo.CountByFolder(ctx, "Pictures", true)
+	if err != nil || recPicCount != 4 {
+		t.Errorf("CountByFolder('Pictures', recursive) = %d, err: %v; want 4", recPicCount, err)
+	}
+
+	directRootCount, err := repo.CountByFolder(ctx, "", false)
+	if err != nil || directRootCount != 2 {
+		t.Errorf("CountByFolder('', direct) = %d, err: %v; want 2", directRootCount, err)
+	}
+	recRootCount, err := repo.CountByFolder(ctx, "", true)
+	if err != nil || recRootCount != 7 {
+		t.Errorf("CountByFolder('', recursive) = %d, err: %v; want 7", recRootCount, err)
+	}
+
+	// 6. Cover photo retrieval
+	coverPic, err := repo.GetFolderCoverPhoto(ctx, "Pictures")
+	if err != nil {
+		t.Fatalf("GetFolderCoverPhoto('Pictures') failed: %v", err)
+	}
+	if coverPic == nil || coverPic.ID != "p-movie-1" {
+		t.Errorf("Expected cover photo 'p-movie-1' for Pictures, got: %+v", coverPic)
+	}
+
+	coverEmpty, err := repo.GetFolderCoverPhoto(ctx, "NonExistent")
+	if err != nil || coverEmpty != nil {
+		t.Errorf("Expected nil cover for nonexistent folder, got %+v, err: %v", coverEmpty, err)
+	}
+}

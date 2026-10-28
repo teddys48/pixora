@@ -271,3 +271,127 @@ func TestStorageFileReadWriteLifecycle(t *testing.T) {
 		t.Errorf("Content mismatch: expected %q, got %q", content, string(readBytes))
 	}
 }
+
+func TestStorageFolderPathValidationAndResolution(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_folder_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create folder hierarchy
+	subDir := filepath.Join(tempDir, "Pictures", "Anime", "Movies")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("Failed to create nested directories: %v", err)
+	}
+	// Create a regular file
+	sampleFile := filepath.Join(tempDir, "photo.jpg")
+	if err := os.WriteFile(sampleFile, []byte("data"), 0644); err != nil {
+		t.Fatalf("Failed to create sample file: %v", err)
+	}
+
+	// Create an external folder and symlink inside tempDir
+	externalDir, err := os.MkdirTemp("", "pixora_ext_dir_*")
+	if err != nil {
+		t.Fatalf("Failed to create external dir: %v", err)
+	}
+	defer os.RemoveAll(externalDir)
+
+	evilSymlink := filepath.Join(tempDir, "evil_folder_symlink")
+	_ = os.Symlink(externalDir, evilSymlink)
+
+	s, err := storage.New(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to init storage: %v", err)
+	}
+
+	// 1. Root folder validation
+	for _, rootInput := range []string{"", ".", "  "} {
+		canonical, err := s.ValidateFolderPath(rootInput)
+		if err != nil {
+			t.Errorf("ValidateFolderPath(%q) unexpected error: %v", rootInput, err)
+		}
+		if canonical != "" {
+			t.Errorf("ValidateFolderPath(%q) expected canonical '', got %q", rootInput, canonical)
+		}
+
+		resolved, can, err := s.ResolveFolderPath(rootInput)
+		if err != nil {
+			t.Errorf("ResolveFolderPath(%q) unexpected error: %v", rootInput, err)
+		}
+		if can != "" || resolved != tempDir {
+			t.Errorf("ResolveFolderPath(%q) got resolved=%q, canonical=%q; want %q, ''", rootInput, resolved, can, tempDir)
+		}
+	}
+
+	// 2. Valid nested folder resolution
+	validCases := []struct {
+		input     string
+		wantCan   string
+		wantMatch string
+	}{
+		{"Pictures", "Pictures", filepath.Join(tempDir, "Pictures")},
+		{"Pictures/Anime", "Pictures/Anime", filepath.Join(tempDir, "Pictures", "Anime")},
+		{"Pictures/Anime/Movies", "Pictures/Anime/Movies", filepath.Join(tempDir, "Pictures", "Anime", "Movies")},
+		{"Pictures/Anime/Movies/", "Pictures/Anime/Movies", filepath.Join(tempDir, "Pictures", "Anime", "Movies")},
+	}
+
+	for _, tc := range validCases {
+		canonical, err := s.ValidateFolderPath(tc.input)
+		if err != nil {
+			t.Errorf("ValidateFolderPath(%q) unexpected error: %v", tc.input, err)
+		}
+		if canonical != tc.wantCan {
+			t.Errorf("ValidateFolderPath(%q) = %q, want %q", tc.input, canonical, tc.wantCan)
+		}
+
+		resolved, can, err := s.ResolveFolderPath(tc.input)
+		if err != nil {
+			t.Errorf("ResolveFolderPath(%q) unexpected error: %v", tc.input, err)
+		}
+		if can != tc.wantCan || resolved != tc.wantMatch {
+			t.Errorf("ResolveFolderPath(%q) = (%q, %q), want (%q, %q)", tc.input, resolved, can, tc.wantMatch, tc.wantCan)
+		}
+	}
+
+	// 3. Traversal attempts must be rejected
+	traversalCases := []string{
+		"../",
+		"../../",
+		"Pictures/../../escape",
+		"/etc",
+		"Pictures/\x00/sub",
+		"..",
+	}
+
+	for _, tc := range traversalCases {
+		_, err := s.ValidateFolderPath(tc)
+		if err == nil {
+			t.Errorf("ValidateFolderPath(%q) expected error, got nil", tc)
+		}
+		_, _, err = s.ResolveFolderPath(tc)
+		if err == nil {
+			t.Errorf("ResolveFolderPath(%q) expected error, got nil", tc)
+		}
+	}
+
+	// 4. Symlink escape check
+	_, _, err = s.ResolveFolderPath("evil_folder_symlink")
+	if err == nil {
+		t.Errorf("Expected path traversal error for symlinked folder escape, got nil")
+	} else if !errors.Is(err, storage.ErrPathTraversal) {
+		t.Errorf("Expected ErrPathTraversal, got: %v", err)
+	}
+
+	// 5. Non-existent folder
+	_, _, err = s.ResolveFolderPath("Pictures/NonExistent")
+	if err == nil || !os.IsNotExist(err) {
+		t.Errorf("Expected os.ErrNotExist for non-existent folder, got: %v", err)
+	}
+
+	// 6. Non-directory path (file passed as folder)
+	_, _, err = s.ResolveFolderPath("photo.jpg")
+	if err == nil || !errors.Is(err, storage.ErrNotDirectory) {
+		t.Errorf("Expected ErrNotDirectory when resolving file as folder, got: %v", err)
+	}
+}

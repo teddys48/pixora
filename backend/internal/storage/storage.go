@@ -16,6 +16,9 @@ var (
 	// ErrInvalidPath is returned when a path is empty or contains invalid characters.
 	ErrInvalidPath = errors.New("invalid storage path")
 
+	// ErrNotDirectory is returned when a folder operation is attempted on a non-directory path.
+	ErrNotDirectory = errors.New("path is not a directory")
+
 	// ErrStorageRootNotFound is returned when the configured storage root does not exist.
 	ErrStorageRootNotFound = errors.New("storage root directory does not exist")
 
@@ -77,6 +80,34 @@ func (s *Storage) ValidateRelativePath(relPath string) error {
 	return nil
 }
 
+// ValidateFolderPath validates a relative folder path.
+// Empty string or "." refers to the storage root and is normalized to "".
+// Returns the canonical forward-slash separated relative path, or an error if invalid/traversal.
+func (s *Storage) ValidateFolderPath(relPath string) (string, error) {
+	trimmed := strings.TrimSpace(relPath)
+	if trimmed == "" || trimmed == "." {
+		return "", nil
+	}
+	if strings.ContainsRune(trimmed, 0) {
+		return "", fmt.Errorf("%w: path contains null byte", ErrInvalidPath)
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "\\") {
+		return "", fmt.Errorf("%w: absolute paths are not permitted: %s", ErrPathTraversal, relPath)
+	}
+
+	clean := filepath.Clean(trimmed)
+	if clean == "." {
+		return "", nil
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("%w: path traversal detected: %s", ErrPathTraversal, relPath)
+	}
+
+	canonical := filepath.ToSlash(clean)
+	canonical = strings.Trim(canonical, "/")
+	return canonical, nil
+}
+
 // ResolvePath securely validates and resolves a relative path under the StorageRoot.
 // It prevents lexical traversal (..) and symlink escapes pointing outside StorageRoot.
 func (s *Storage) ResolvePath(relPath string) (string, error) {
@@ -121,6 +152,66 @@ func (s *Storage) ResolvePath(relPath string) (string, error) {
 	}
 
 	return target, nil
+}
+
+// ResolveFolderPath securely validates and resolves a relative folder path under StorageRoot.
+// It returns the absolute path on disk and the canonical relative path.
+// Verifies that the resolved path stays within StorageRoot, evaluates symlinks,
+// checks existence, and ensures the target is actually a directory.
+func (s *Storage) ResolveFolderPath(relPath string) (resolved string, canonical string, err error) {
+	canonical, err = s.ValidateFolderPath(relPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	target := s.root
+	if canonical != "" {
+		target = filepath.Join(s.root, filepath.FromSlash(canonical))
+	}
+
+	relToRoot, err := filepath.Rel(s.root, target)
+	if err != nil || strings.HasPrefix(relToRoot, "..") {
+		return "", "", fmt.Errorf("%w: path escapes storage root: %s", ErrPathTraversal, relPath)
+	}
+
+	// Symlink escape check
+	realRoot, err := filepath.EvalSymlinks(s.root)
+	if err != nil {
+		realRoot = s.root
+	}
+
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", os.ErrNotExist
+		}
+		if os.IsPermission(err) {
+			return "", "", fmt.Errorf("%w: %s", ErrPermissionDenied, relPath)
+		}
+		return "", "", err
+	}
+
+	relReal, err := filepath.Rel(realRoot, realTarget)
+	if err != nil || strings.HasPrefix(relReal, "..") {
+		return "", "", fmt.Errorf("%w: symlink target escapes storage root: %s", ErrPathTraversal, relPath)
+	}
+
+	info, err := os.Stat(realTarget)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", os.ErrNotExist
+		}
+		if os.IsPermission(err) {
+			return "", "", fmt.Errorf("%w: %s", ErrPermissionDenied, relPath)
+		}
+		return "", "", err
+	}
+
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("%w: %s", ErrNotDirectory, relPath)
+	}
+
+	return target, canonical, nil
 }
 
 // CheckReadAccess verifies if the storage root exists and is readable.

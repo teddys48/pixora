@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -400,50 +401,52 @@ func TestPhase4FullServerLifecycle(t *testing.T) {
 		t.Fatalf("Scan failed: %v", err)
 	}
 
-	reqPhotos := httptest.NewRequest("GET", "/api/photos", nil)
-	respPhotos, _ := app.Test(reqPhotos, -1)
-	var photosList struct {
+	// 2. Fetch photo ID
+	reqList := httptest.NewRequest("GET", "/api/photos", nil)
+	respList, _ := app.Test(reqList, -1)
+	var listResp struct {
 		Photos []api.PhotoResponse `json:"photos"`
 	}
-	bodyP, _ := io.ReadAll(respPhotos.Body)
-	_ = json.Unmarshal(bodyP, &photosList)
-	if len(photosList.Photos) != 1 {
-		t.Fatalf("Expected 1 scanned photo, got %d", len(photosList.Photos))
+	bodyP, _ := io.ReadAll(respList.Body)
+	_ = json.Unmarshal(bodyP, &listResp)
+	if len(listResp.Photos) != 1 {
+		t.Fatalf("Expected 1 scanned photo, got %d", len(listResp.Photos))
 	}
-	photoID := photosList.Photos[0].ID
+	photoID := listResp.Photos[0].ID
 
-	// 2. Create Album: POST /api/albums
-	createPayload := bytes.NewReader([]byte(`{"name": "Landscapes", "description": "Beautiful landscape photos"}`))
+	// 3. Create virtual album: POST /api/albums
+	createPayload := bytes.NewReader([]byte(`{"name": "Wilderness", "description": "Nature shots"}`))
 	reqCreate := httptest.NewRequest("POST", "/api/albums", createPayload)
 	reqCreate.Header.Set("Content-Type", "application/json")
 	respCreate, err := app.Test(reqCreate, -1)
 	if err != nil || respCreate.StatusCode != fiber.StatusCreated {
-		t.Fatalf("Create album failed: status %d, err %v", respCreate.StatusCode, err)
+		t.Fatalf("Create album failed with %v, status %d", err, respCreate.StatusCode)
 	}
+
 	var createdAlbum models.Album
-	bodyAlb, _ := io.ReadAll(respCreate.Body)
-	_ = json.Unmarshal(bodyAlb, &createdAlbum)
+	bodyCA, _ := io.ReadAll(respCreate.Body)
+	_ = json.Unmarshal(bodyCA, &createdAlbum)
 	albumID := createdAlbum.ID
 
-	// 3. Case-insensitive duplicate name conflict: POST /api/albums with "landscapes"
-	dupPayload := bytes.NewReader([]byte(`{"name": "landscapes"}`))
+	// Duplicate album name must return 409 Conflict
+	dupPayload := bytes.NewReader([]byte(`{"name": "wilderness"}`))
 	reqDup := httptest.NewRequest("POST", "/api/albums", dupPayload)
 	reqDup.Header.Set("Content-Type", "application/json")
 	respDup, _ := app.Test(reqDup, -1)
 	if respDup.StatusCode != fiber.StatusConflict {
-		t.Errorf("Expected 409 Conflict for duplicate album name, got %d", respDup.StatusCode)
+		t.Errorf("Expected 409 Conflict on duplicate album, got %d", respDup.StatusCode)
 	}
 
 	// 4. Add photo to album: POST /api/albums/:id/photos
-	addPayload := bytes.NewReader([]byte(`{"photoIds": ["` + photoID + `"]}`))
+	addPayload := bytes.NewReader([]byte(fmt.Sprintf(`{"photoIds": ["%s"]}`, photoID)))
 	reqAdd := httptest.NewRequest("POST", "/api/albums/"+albumID+"/photos", addPayload)
 	reqAdd.Header.Set("Content-Type", "application/json")
 	respAdd, err := app.Test(reqAdd, -1)
 	if err != nil || respAdd.StatusCode != fiber.StatusOK {
-		t.Fatalf("Add photos to album failed: status %d, err %v", respAdd.StatusCode, err)
+		t.Fatalf("Add photo to album failed: %v, status %d", err, respAdd.StatusCode)
 	}
 
-	// 5. Verify album photoCount and cover thumbnail
+	// 5. Inspect album photo count and cover thumbnail: GET /api/albums/:id
 	reqGetAlbum := httptest.NewRequest("GET", "/api/albums/"+albumID, nil)
 	respGetAlbum, _ := app.Test(reqGetAlbum, -1)
 	var fetchedAlbum models.Album
@@ -500,5 +503,164 @@ func TestPhase4FullServerLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(photoPath); os.IsNotExist(err) {
 		t.Errorf("Deleting album must NEVER delete files in STORAGE_ROOT")
+	}
+}
+
+func TestPhysicalFolderBrowsingFullLifecycle(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_folder_lifecycle_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mediaDir := filepath.Join(tempDir, "media")
+	dbPath := filepath.Join(tempDir, "data", "pixora.db")
+	_ = os.MkdirAll(mediaDir, 0755)
+	_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
+
+	// Create nested structure:
+	// Pictures/Anime/Movies/film1.jpg
+	// Pictures/pic1.jpg
+	// Vacation/beach.jpg
+	moviesDir := filepath.Join(mediaDir, "Pictures", "Anime", "Movies")
+	vacationDir := filepath.Join(mediaDir, "Vacation")
+	_ = os.MkdirAll(moviesDir, 0755)
+	_ = os.MkdirAll(vacationDir, 0755)
+
+	_ = os.WriteFile(filepath.Join(moviesDir, "film1.jpg"), createTestJPEG(600, 400), 0644)
+	_ = os.WriteFile(filepath.Join(mediaDir, "Pictures", "pic1.jpg"), createTestJPEG(800, 600), 0644)
+	_ = os.WriteFile(filepath.Join(vacationDir, "beach.jpg"), createTestJPEG(1024, 768), 0644)
+
+	cfg := &config.Config{
+		Port:         "8080",
+		Host:         "127.0.0.1",
+		Env:          "testing",
+		StorageRoot:  mediaDir,
+		DatabasePath: dbPath,
+	}
+
+	store, err := storage.New(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("Failed to init storage: %v", err)
+	}
+
+	db, err := database.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatalf("Failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	albumRepo := repository.NewSQLiteAlbumRepository(db)
+	thumbSvc := media.NewThumbnailService(store)
+	mediaScanner := scanner.New(store, photoRepo)
+
+	app := server.NewWithDependencies(server.Dependencies{
+		Config:    cfg,
+		DB:        db,
+		Storage:   store,
+		PhotoRepo: photoRepo,
+		AlbumRepo: albumRepo,
+		Thumbnail: thumbSvc,
+		Scanner:   mediaScanner,
+	})
+
+	// 1. Initial folder listing before scan: folders exist on disk with 0 indexed photos
+	reqFolders0 := httptest.NewRequest("GET", "/api/folders", nil)
+	respFolders0, err := app.Test(reqFolders0, -1)
+	if err != nil || respFolders0.StatusCode != fiber.StatusOK {
+		t.Fatalf("GET /api/folders failed: %v, status: %d", err, respFolders0.StatusCode)
+	}
+
+	var list0 api.FolderListResponse
+	_ = json.NewDecoder(respFolders0.Body).Decode(&list0)
+	if list0.Total != 2 {
+		t.Errorf("Expected 2 top-level physical folders (Pictures, Vacation), got %d", list0.Total)
+	}
+
+	// 2. Scan entire media library: POST /api/photos/scan?sync=true
+	reqScan := httptest.NewRequest("POST", "/api/photos/scan?sync=true", nil)
+	respScan, err := app.Test(reqScan, -1)
+	if err != nil || respScan.StatusCode != fiber.StatusOK {
+		t.Fatalf("Scan failed: %v, status %d", err, respScan.StatusCode)
+	}
+
+	// 3. Inspect top-level folders after scan
+	reqFolders1 := httptest.NewRequest("GET", "/api/folders", nil)
+	respFolders1, _ := app.Test(reqFolders1, -1)
+	var list1 api.FolderListResponse
+	_ = json.NewDecoder(respFolders1.Body).Decode(&list1)
+
+	for _, f := range list1.Folders {
+		if f.Name == "Pictures" {
+			// Pictures contains pic1.jpg (direct: 1) and film1.jpg in Anime/Movies (total: 2)
+			if f.PhotoCount != 2 || f.DirectPhotoCount != 1 || f.SubfolderCount != 1 {
+				t.Errorf("Pictures folder counts mismatch: %+v", f)
+			}
+		} else if f.Name == "Vacation" {
+			if f.PhotoCount != 1 || f.DirectPhotoCount != 1 {
+				t.Errorf("Vacation folder counts mismatch: %+v", f)
+			}
+		}
+	}
+
+	// 4. Navigate into Pictures: GET /api/folders/contents?path=Pictures
+	reqPic := httptest.NewRequest("GET", "/api/folders/contents?path=Pictures", nil)
+	respPic, _ := app.Test(reqPic, -1)
+	var picContents api.FolderContentsResponse
+	_ = json.NewDecoder(respPic.Body).Decode(&picContents)
+
+	if picContents.TotalPhotos != 1 || len(picContents.Photos) != 1 {
+		t.Errorf("Expected 1 direct photo in Pictures, got %d", picContents.TotalPhotos)
+	}
+	if len(picContents.Folders) != 1 || picContents.Folders[0].Name != "Anime" {
+		t.Errorf("Expected 1 child folder 'Anime' in Pictures, got %+v", picContents.Folders)
+	}
+	if len(picContents.Breadcrumbs) != 2 {
+		t.Errorf("Expected 2 breadcrumbs for Pictures, got %d", len(picContents.Breadcrumbs))
+	}
+
+	// 5. Navigate into nested Movies: GET /api/folders/contents?path=Pictures/Anime/Movies
+	reqMovies := httptest.NewRequest("GET", "/api/folders/contents?path=Pictures/Anime/Movies", nil)
+	respMovies, _ := app.Test(reqMovies, -1)
+	var movieContents api.FolderContentsResponse
+	_ = json.NewDecoder(respMovies.Body).Decode(&movieContents)
+
+	if movieContents.TotalPhotos != 1 || len(movieContents.Photos) != 1 {
+		t.Errorf("Expected 1 direct photo in Movies, got %d", movieContents.TotalPhotos)
+	}
+	if len(movieContents.Folders) != 0 {
+		t.Errorf("Expected 0 subfolders in Movies, got %d", len(movieContents.Folders))
+	}
+	if len(movieContents.Breadcrumbs) != 4 {
+		t.Errorf("Expected 4 breadcrumbs for Movies, got %d", len(movieContents.Breadcrumbs))
+	}
+	if movieContents.ParentPath == nil || *movieContents.ParentPath != "Pictures/Anime" {
+		t.Errorf("Expected parentPath 'Pictures/Anime', got %v", movieContents.ParentPath)
+	}
+
+	// 6. Paginate photos in folder: GET /api/folders/photos?path=Pictures/Anime/Movies
+	reqMoviePhotos := httptest.NewRequest("GET", "/api/folders/photos?path=Pictures/Anime/Movies&limit=5&offset=0", nil)
+	respMoviePhotos, _ := app.Test(reqMoviePhotos, -1)
+	if respMoviePhotos.StatusCode != fiber.StatusOK {
+		t.Fatalf("GET /api/folders/photos failed: %d", respMoviePhotos.StatusCode)
+	}
+
+	// 7. Test traversal rejection: GET /api/folders/contents?path=../escape
+	reqBad := httptest.NewRequest("GET", "/api/folders/contents?path=../escape", nil)
+	respBad, _ := app.Test(reqBad, -1)
+	if respBad.StatusCode != fiber.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden for traversal, got %d", respBad.StatusCode)
+	}
+
+	// 8. Verify all original media files in mediaDir are intact and untouched
+	for _, expectedFile := range []string{
+		filepath.Join(moviesDir, "film1.jpg"),
+		filepath.Join(mediaDir, "Pictures", "pic1.jpg"),
+		filepath.Join(vacationDir, "beach.jpg"),
+	} {
+		if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
+			t.Errorf("Original media file %s was unexpectedly removed or modified", expectedFile)
+		}
 	}
 }

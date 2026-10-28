@@ -482,7 +482,7 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 	}
 }
 
-// ScanPhotosHandler handles POST /api/photos/scan.
+// ScanPhotosHandler handles POST /api/photos/scan with optional ?path=... and ?sync=true.
 func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if s == nil {
@@ -490,9 +490,10 @@ func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 		}
 
 		isSync := c.Query("sync") == "true"
+		targetPath := c.Query("path")
 
 		if isSync {
-			status, err := s.Scan(c.Context())
+			status, err := s.ScanPath(c.Context(), targetPath)
 			if err != nil {
 				if errors.Is(err, scanner.ErrScanInProgress) {
 					return c.Status(fiber.StatusConflict).JSON(status)
@@ -509,7 +510,7 @@ func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 		}
 
 		go func() {
-			_, _ = s.Scan(context.Background())
+			_, _ = s.ScanPath(context.Background(), targetPath)
 		}()
 
 		// Small delay to allow the scanner goroutine to update status

@@ -66,9 +66,16 @@ func (s *Scanner) Status() ScanStatus {
 	return s.status
 }
 
-// Scan performs media discovery and indexing.
+// Scan performs media discovery and indexing across the entire storage root.
 // If another scan is already running, it returns ErrScanInProgress.
 func (s *Scanner) Scan(ctx context.Context) (ScanStatus, error) {
+	return s.ScanPath(ctx, "")
+}
+
+// ScanPath performs media discovery and indexing for a specific relative folder under storage root.
+// If relPath is empty, it scans the entire storage root.
+// Deduplication is enforced via relative_path; unchanged files are skipped, and no duplicates are created.
+func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string) (ScanStatus, error) {
 	if s.storage == nil {
 		return ScanStatus{Status: "failed"}, errors.New("storage unavailable")
 	}
@@ -108,6 +115,24 @@ func (s *Scanner) Scan(ctx context.Context) (ScanStatus, error) {
 		realRoot = rootDir
 	}
 
+	walkStartDir := rootDir
+	cleanRel := strings.TrimSpace(targetRelPath)
+	if cleanRel != "" && cleanRel != "." {
+		resolvedDir, _, err := s.storage.ResolveFolderPath(cleanRel)
+		if err != nil {
+			now := time.Now().UTC()
+			s.statusMu.Lock()
+			s.status.Status = "failed"
+			s.status.FinishedAt = &now
+			s.status.DurationMs = time.Since(startTime).Milliseconds()
+			s.status.Errors = []string{fmt.Sprintf("invalid scan folder %q: %v", targetRelPath, err)}
+			statusCopy := s.status
+			s.statusMu.Unlock()
+			return statusCopy, err
+		}
+		walkStartDir = resolvedDir
+	}
+
 	var (
 		scanned int
 		indexed int
@@ -117,7 +142,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanStatus, error) {
 		errList []string
 	)
 
-	walkErr := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(walkStartDir, func(path string, d fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

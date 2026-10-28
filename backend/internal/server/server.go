@@ -100,6 +100,13 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 		apiGroup.Delete("/albums/:id/photos/:photoId", api.RemovePhotoFromAlbumHandler(deps.AlbumRepo))
 	}
 
+	// Physical Folder browsing routes
+	if deps.Storage != nil && deps.PhotoRepo != nil {
+		apiGroup.Get("/folders/contents", api.GetFolderContentsHandler(deps.Storage, deps.PhotoRepo))
+		apiGroup.Get("/folders/photos", api.GetFolderPhotosHandler(deps.Storage, deps.PhotoRepo))
+		apiGroup.Get("/folders", api.ListFoldersHandler(deps.Storage, deps.PhotoRepo))
+	}
+
 	// Photo Collection and Upload routes
 	if deps.PhotoRepo != nil {
 		apiGroup.Get("/photos", api.ListPhotosHandler(deps.PhotoRepo))

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +22,9 @@ type PhotoRepository interface {
 	GetByRelativePath(ctx context.Context, relPath string) (*models.Photo, error)
 	List(ctx context.Context, offset, limit int, sortBy, order string) ([]models.Photo, int, error)
 	Count(ctx context.Context) (int, error)
+	ListByFolder(ctx context.Context, folderPath string, offset, limit int, sortBy, order string) ([]models.Photo, int, error)
+	CountByFolder(ctx context.Context, folderPath string, recursive bool) (int, error)
+	GetFolderCoverPhoto(ctx context.Context, folderPath string) (*models.Photo, error)
 }
 
 // SQLitePhotoRepository implements PhotoRepository using SQLite.
@@ -31,6 +35,14 @@ type SQLitePhotoRepository struct {
 // NewSQLitePhotoRepository creates a new SQLitePhotoRepository.
 func NewSQLitePhotoRepository(db *database.DB) *SQLitePhotoRepository {
 	return &SQLitePhotoRepository{db: db}
+}
+
+func cleanFolderPath(p string) string {
+	cleaned := strings.Trim(filepath.ToSlash(filepath.Clean(strings.TrimSpace(p))), "/")
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
 }
 
 // Create inserts a new photo record.
@@ -234,4 +246,164 @@ func (r *SQLitePhotoRepository) Count(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("failed to count photos: %w", err)
 	}
 	return count, nil
+}
+
+// ListByFolder returns photos whose direct parent folder is folderPath, with deterministic sorting and pagination.
+func (r *SQLitePhotoRepository) ListByFolder(ctx context.Context, folderPath string, offset, limit int, sortBy, order string) ([]models.Photo, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	normPath := cleanFolderPath(folderPath)
+
+	var whereClause string
+	var countArgs []interface{}
+
+	if normPath == "" {
+		whereClause = "INSTR(relative_path, '/') = 0"
+	} else {
+		prefix := normPath + "/"
+		whereClause = "SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0"
+		countArgs = append(countArgs, len(prefix), prefix, len(prefix)+1)
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM photos WHERE %s", whereClause)
+	var total int
+	if err := r.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count photos in folder %q: %w", normPath, err)
+	}
+
+	var orderByClause string
+	dir := "DESC"
+	if strings.ToLower(order) == "asc" {
+		dir = "ASC"
+	}
+
+	switch sortBy {
+	case "date":
+		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
+	case "modified":
+		orderByClause = fmt.Sprintf("file_modified_at %s, id ASC", dir)
+	case "filename":
+		orderByClause = fmt.Sprintf("original_filename %s, id ASC", dir)
+	case "size":
+		orderByClause = fmt.Sprintf("file_size %s, id ASC", dir)
+	case "created":
+		orderByClause = fmt.Sprintf("created_at %s, id ASC", dir)
+	default:
+		orderByClause = fmt.Sprintf("COALESCE(taken_at, file_modified_at, created_at) %s, id ASC", dir)
+	}
+
+	query := fmt.Sprintf(`
+SELECT id, relative_path, original_filename, media_type, file_size,
+       width, height, taken_at, file_modified_at, created_at, updated_at
+FROM photos
+WHERE %s
+ORDER BY %s
+LIMIT ? OFFSET ?`, whereClause, orderByClause)
+
+	queryArgs := make([]interface{}, len(countArgs), len(countArgs)+2)
+	copy(queryArgs, countArgs)
+	queryArgs = append(queryArgs, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query photos in folder %q: %w", normPath, err)
+	}
+	defer rows.Close()
+
+	photos := make([]models.Photo, 0, limit)
+	for rows.Next() {
+		var p models.Photo
+		if err := rows.Scan(
+			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
+			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan photo: %w", err)
+		}
+		photos = append(photos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error during folder photos iteration: %w", err)
+	}
+
+	return photos, total, nil
+}
+
+// CountByFolder returns the count of photos in folderPath. If recursive is true, includes all descendant subfolders.
+func (r *SQLitePhotoRepository) CountByFolder(ctx context.Context, folderPath string, recursive bool) (int, error) {
+	normPath := cleanFolderPath(folderPath)
+
+	var query string
+	var args []interface{}
+
+	if normPath == "" {
+		if recursive {
+			query = "SELECT COUNT(*) FROM photos"
+		} else {
+			query = "SELECT COUNT(*) FROM photos WHERE INSTR(relative_path, '/') = 0"
+		}
+	} else {
+		prefix := normPath + "/"
+		if recursive {
+			query = "SELECT COUNT(*) FROM photos WHERE SUBSTR(relative_path, 1, ?) = ?"
+			args = append(args, len(prefix), prefix)
+		} else {
+			query = "SELECT COUNT(*) FROM photos WHERE SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0"
+			args = append(args, len(prefix), prefix, len(prefix)+1)
+		}
+	}
+
+	var count int
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count photos for folder %q (recursive=%v): %w", normPath, recursive, err)
+	}
+	return count, nil
+}
+
+// GetFolderCoverPhoto returns the latest photo in folderPath (or its descendants) to use as cover thumbnail.
+func (r *SQLitePhotoRepository) GetFolderCoverPhoto(ctx context.Context, folderPath string) (*models.Photo, error) {
+	normPath := cleanFolderPath(folderPath)
+
+	var query string
+	var args []interface{}
+
+	if normPath == "" {
+		query = `
+SELECT id, relative_path, original_filename, media_type, file_size,
+       width, height, taken_at, file_modified_at, created_at, updated_at
+FROM photos
+ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC
+LIMIT 1`
+	} else {
+		prefix := normPath + "/"
+		query = `
+SELECT id, relative_path, original_filename, media_type, file_size,
+       width, height, taken_at, file_modified_at, created_at, updated_at
+FROM photos
+WHERE SUBSTR(relative_path, 1, ?) = ?
+ORDER BY COALESCE(taken_at, file_modified_at, created_at) DESC, id ASC
+LIMIT 1`
+		args = append(args, len(prefix), prefix)
+	}
+
+	var p models.Photo
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
+		&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
+		&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get cover photo for folder %q: %w", normPath, err)
+	}
+
+	return &p, nil
 }

@@ -6,7 +6,7 @@ import {
   ScanStatus,
   UploadResponse,
 } from '@/types/photo'
-import { Folder } from '@/types/folder'
+import { Folder, PhysicalFolder, FolderContents } from '@/types/folder'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
@@ -104,30 +104,25 @@ export async function fetchPhoto(id: string, signal?: AbortSignal): Promise<Phot
   return toFrontendPhoto(data)
 }
 
-export interface UploadResult {
-  photos: Photo[]
-  errors?: { filename: string; error: string }[]
-}
-
-export function uploadPhotos(
+export async function uploadPhotos(
   files: File[],
-  onProgress?: (percent: number) => void
-): Promise<UploadResult> {
-  return new Promise((resolve, reject) => {
-    const formData = new FormData()
-    files.forEach((file) => {
-      formData.append('photos', file)
-    })
+  onProgress?: (progress: number) => void
+): Promise<UploadResponse> {
+  const formData = new FormData()
+  files.forEach((file) => {
+    formData.append('photos', file)
+  })
 
+  return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${API_BASE_URL}/photos`)
+    xhr.open('POST', `${API_BASE_URL}/photos/upload`)
     xhr.setRequestHeader('Accept', 'application/json')
 
     if (xhr.upload && onProgress) {
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100)
-          onProgress(percent)
+          const percentComplete = (e.loaded / e.total) * 100
+          onProgress(percentComplete)
         }
       }
     }
@@ -137,62 +132,67 @@ export function uploadPhotos(
       try {
         data = JSON.parse(xhr.responseText)
       } catch {
-        return reject(new Error(`Failed to parse server upload response (HTTP ${xhr.status})`))
+        return reject(new Error('Invalid server response format'))
       }
 
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve({
-          photos: (data.photos || []).map(toFrontendPhoto),
-          errors: data.errors,
-        })
+        resolve(data)
       } else if (xhr.status === 207) {
-        // Multi-status (partial success)
-        resolve({
-          photos: (data.photos || []).map(toFrontendPhoto),
-          errors: data.errors,
-        })
+        // Multi-status partial success
+        resolve(data)
       } else {
-        const msg = data.message || `Upload failed with HTTP ${xhr.status}`
-        reject(new Error(msg))
+        const errorMsg =
+          (data as unknown as { message?: string })?.message ||
+          `Upload failed with HTTP ${xhr.status}`
+        reject(new Error(errorMsg))
       }
     }
 
     xhr.onerror = () => {
-      reject(new Error('Network error occurred during photo upload'))
+      reject(new Error('Network error during photo upload'))
+    }
+
+    xhr.ontimeout = () => {
+      reject(new Error('Upload request timed out'))
     }
 
     xhr.send(formData)
   })
 }
 
-export async function triggerScan(sync = false): Promise<ScanStatus> {
-  const url = `${API_BASE_URL}/photos/scan${sync ? '?sync=true' : ''}`
+export async function triggerScan(
+  sync = false,
+  path?: string,
+  signal?: AbortSignal
+): Promise<ScanStatus> {
+  const params = new URLSearchParams()
+  if (sync) params.set('sync', 'true')
+  if (path) params.set('path', path)
+
+  const url = `${API_BASE_URL}/photos/scan${params.toString() ? `?${params.toString()}` : ''}`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
     },
+    signal,
   })
 
-  const data: ScanStatus = await response.json().catch(() => ({
-    status: 'failed',
-    scanned: 0,
-    indexed: 0,
-    updated: 0,
-    skipped: 0,
-    failed: 1,
-    errors: [`HTTP ${response.status}`],
-  }))
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to trigger scan: HTTP ${response.status}`)
+  }
 
-  return data
+  return response.json()
 }
 
-export async function fetchScanStatus(): Promise<ScanStatus> {
+export async function fetchScanStatus(signal?: AbortSignal): Promise<ScanStatus> {
   const response = await fetch(`${API_BASE_URL}/photos/scan`, {
     method: 'GET',
     headers: {
       Accept: 'application/json',
     },
+    signal,
   })
 
   if (!response.ok) {
@@ -202,7 +202,10 @@ export async function fetchScanStatus(): Promise<ScanStatus> {
   return response.json()
 }
 
-// Album API (backed by real SQLite backend)
+// ==========================================
+// Virtual Albums API (backed by SQLite)
+// ==========================================
+
 export interface BackendAlbum {
   id: string
   name: string
@@ -417,5 +420,133 @@ export async function removePhotoFromAlbum(albumId: string, photoId: string): Pr
     throw new Error(
       errorBody?.message || `Failed to remove photo from album: HTTP ${response.status}`
     )
+  }
+}
+
+// ==========================================
+// Physical Folders API (Filesystem browsing under STORAGE_ROOT)
+// ==========================================
+
+export interface FetchPhysicalFoldersOptions {
+  path?: string
+  sort?: string
+  order?: string
+}
+
+export async function fetchPhysicalFolders(
+  options: FetchPhysicalFoldersOptions = {},
+  signal?: AbortSignal
+): Promise<{ path: string; folders: PhysicalFolder[]; total: number }> {
+  const params = new URLSearchParams()
+  if (options.path !== undefined) params.set('path', options.path)
+  if (options.sort) params.set('sort', options.sort)
+  if (options.order) params.set('order', options.order)
+
+  const url = `${API_BASE_URL}/folders${params.toString() ? `?${params.toString()}` : ''}`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch folders: HTTP ${response.status}`)
+  }
+
+  const data = await response.json()
+  const folders = Array.isArray(data.folders) ? data.folders : []
+  return {
+    path: data.path || '',
+    folders: folders,
+    total: typeof data.total === 'number' ? data.total : folders.length,
+  }
+}
+
+export interface FetchFolderContentsOptions {
+  limit?: number
+  offset?: number
+  sort?: string
+  order?: string
+}
+
+export async function fetchFolderContents(
+  path?: string,
+  options: FetchFolderContentsOptions = {},
+  signal?: AbortSignal
+): Promise<FolderContents> {
+  const params = new URLSearchParams()
+  if (path !== undefined) params.set('path', path)
+  if (options.limit !== undefined) params.set('limit', options.limit.toString())
+  if (options.offset !== undefined) params.set('offset', options.offset.toString())
+  if (options.sort) params.set('sort', options.sort)
+  if (options.order) params.set('order', options.order)
+
+  const url = `${API_BASE_URL}/folders/contents${params.toString() ? `?${params.toString()}` : ''}`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch folder contents: HTTP ${response.status}`)
+  }
+
+  const data = await response.json()
+  return {
+    ...data,
+    folders: Array.isArray(data.folders) ? data.folders : [],
+    breadcrumbs: Array.isArray(data.breadcrumbs) ? data.breadcrumbs : [],
+    photos: (Array.isArray(data.photos) ? data.photos : []).map(toFrontendPhoto),
+  }
+}
+
+export interface FetchFolderPhotosOptions {
+  limit?: number
+  offset?: number
+  sort?: string
+  order?: string
+}
+
+export async function fetchFolderPhotos(
+  path: string,
+  options: FetchFolderPhotosOptions = {},
+  signal?: AbortSignal
+): Promise<{ path: string; photos: Photo[]; total: number; limit: number; offset: number }> {
+  const params = new URLSearchParams()
+  params.set('path', path)
+  if (options.limit !== undefined) params.set('limit', options.limit.toString())
+  if (options.offset !== undefined) params.set('offset', options.offset.toString())
+  if (options.sort) params.set('sort', options.sort)
+  if (options.order) params.set('order', options.order)
+
+  const url = `${API_BASE_URL}/folders/photos?${params.toString()}`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch folder photos: HTTP ${response.status}`)
+  }
+
+  const data = await response.json()
+  const photos = (Array.isArray(data.photos) ? data.photos : []).map(toFrontendPhoto)
+  return {
+    path: data.path || path,
+    photos: photos,
+    total: typeof data.total === 'number' ? data.total : photos.length,
+    limit: data.limit || 50,
+    offset: data.offset || 0,
   }
 }
