@@ -6,6 +6,7 @@ import {
   ScanStatus,
   UploadResponse,
 } from '@/types/photo'
+import { Folder } from '@/types/folder'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
@@ -20,6 +21,7 @@ export function toFrontendPhoto(p: PhotoResponse): Photo {
     url: p.url,
     thumbnailUrl: p.thumbnailUrl,
     date: date,
+    takenAt: p.takenAt,
     size: p.fileSize,
     metadata: {
       width: p.width || 0,
@@ -198,4 +200,66 @@ export async function fetchScanStatus(): Promise<ScanStatus> {
   }
 
   return response.json()
+}
+
+// Album API (backed by real SQLite backend)
+export interface BackendAlbum {
+  id: string
+  name: string
+  description: string
+  photoCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export async function fetchAlbums(signal?: AbortSignal): Promise<Folder[]> {
+  const response = await fetch(`${API_BASE_URL}/albums`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch albums: HTTP ${response.status}`)
+  }
+
+  const data: { albums: BackendAlbum[] } = await response.json()
+  return (data.albums || []).map((a) => ({
+    id: a.id,
+    name: a.name,
+    description: a.description,
+    photoCount: a.photoCount || 0,
+    coverUrl: undefined,
+    createdAt: a.createdAt,
+    updatedAt: a.updatedAt,
+  }))
+}
+
+export async function createAlbum(name: string, description: string): Promise<Folder> {
+  const response = await fetch(`${API_BASE_URL}/albums`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({ name, description }),
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to create album: HTTP ${response.status}`)
+  }
+
+  const a: BackendAlbum = await response.json()
+  return {
+    id: a.id,
+    name: a.name,
+    description: a.description,
+    photoCount: a.photoCount || 0,
+    coverUrl: undefined,
+    createdAt: a.createdAt,
+    updatedAt: a.updatedAt,
+  }
 }

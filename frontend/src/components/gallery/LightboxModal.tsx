@@ -151,7 +151,8 @@ export function LightboxModal({
             <FallbackImage
               src={photo.url}
               alt={photo.title}
-              className="max-h-[82vh] max-w-[88vw] w-auto h-auto object-contain rounded-lg shadow-2xl"
+              className="max-h-[82vh] max-w-[88vw] w-auto h-auto rounded-lg shadow-2xl flex items-center justify-center"
+              imgClassName="max-h-[82vh] max-w-[88vw] w-auto h-auto object-contain rounded-lg shadow-2xl"
             />
           </div>
         </div>

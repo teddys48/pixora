@@ -6,12 +6,14 @@ interface FallbackImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
   fallbackSrc?: string
   alt: string
   aspectRatio?: 'video' | 'square' | 'portrait' | 'auto'
+  imgClassName?: string
 }
 
 export function FallbackImage({
   src,
   alt,
   className,
+  imgClassName,
   aspectRatio = 'auto',
   ...props
 }: FallbackImageProps) {
@@ -41,8 +43,15 @@ export function FallbackImage({
     )
   }
 
+  // Determine object-fit styling: prefer explicit imgClassName, or extract object-contain from className
+  const objectFitClass = imgClassName
+    ? imgClassName
+    : className?.includes('object-contain')
+    ? 'object-contain'
+    : 'object-cover'
+
   return (
-    <div className={cn('relative overflow-hidden bg-muted/30', aspectClass, className)}>
+    <div className={cn('relative overflow-hidden bg-muted/30 flex items-center justify-center', aspectClass, className)}>
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-muted/40 animate-pulse">
           <Camera className="w-6 h-6 text-muted-foreground/30 animate-pulse" />
@@ -58,8 +67,9 @@ export function FallbackImage({
           setHasError(true)
         }}
         className={cn(
-          'w-full h-full object-cover transition-opacity duration-300',
-          isLoading ? 'opacity-0' : 'opacity-100'
+          'w-full h-full transition-opacity duration-300',
+          isLoading ? 'opacity-0' : 'opacity-100',
+          objectFitClass
         )}
         {...props}
       />

@@ -93,12 +93,27 @@ func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (
 	return resolvedThumb, nil
 }
 
-// generateThumbnail decodes the source image, applies orientation, scales it, and writes JPEG to targetPath.
+// generateThumbnail decodes the source image, applies EXIF orientation, scales it preserving aspect ratio, and writes JPEG to targetPath.
 func (s *ThumbnailService) generateThumbnail(r io.Reader, targetPath string) error {
+	orientation := 1
+	if rs, ok := r.(io.ReadSeeker); ok {
+		if meta, err := ExtractMetadata(rs); err == nil && meta.Orientation >= 1 && meta.Orientation <= 8 {
+			orientation = meta.Orientation
+		}
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("failed to reset reader: %w", err)
+		}
+	}
+
 	// Decode original image
 	srcImg, _, err := image.Decode(r)
 	if err != nil {
 		return fmt.Errorf("%w: failed to decode source image: %v", ErrInvalidImage, err)
+	}
+
+	// Apply EXIF orientation transformation if necessary
+	if orientation > 1 {
+		srcImg = ApplyOrientation(srcImg, orientation)
 	}
 
 	// Calculate thumbnail dimensions

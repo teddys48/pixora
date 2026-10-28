@@ -1,12 +1,12 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
-import { Photo, PhotoSortOption, PhotoViewMode, ScanStatus } from '@/types/photo'
+import { useMemo } from 'react'
+import { Photo } from '@/types/photo'
 import { PhotoCard } from '@/components/gallery/PhotoCard'
 import { GalleryControls } from '@/components/gallery/GalleryControls'
 import { EmptyState } from '@/components/gallery/EmptyState'
 import { LoadingState } from '@/components/gallery/LoadingState'
 import { Button } from '@/components/ui/Button'
-import { fetchPhotos, triggerScan, fetchScanStatus } from '@/lib/api'
-import { AlertCircle, RefreshCw, CheckCircle2 } from 'lucide-react'
+import { usePhotos } from '@/context/PhotosContext'
+import { AlertCircle, RefreshCw, CheckCircle2, FolderOpen } from 'lucide-react'
 
 interface PhotosPageProps {
   onSelectPhoto: (photo: Photo, photosList: Photo[]) => void
@@ -21,121 +21,25 @@ export function PhotosPage({
   folderFilter,
   onClearFolderFilter,
 }: PhotosPageProps) {
-  const [photos, setPhotos] = useState<Photo[]>([])
-  const [totalPhotos, setTotalPhotos] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const [searchQuery, setSearchQuery] = useState('')
-  const [sortOption, setSortOption] = useState<PhotoSortOption>('date-desc')
-  const [viewMode, setViewMode] = useState<PhotoViewMode>('grid')
-
-  const [isScanning, setIsScanning] = useState(false)
-  const [scanResult, setScanResult] = useState<ScanStatus | null>(null)
-
-  // Load photos from API
-  const loadPhotos = useCallback(async (isInitial = false) => {
-    if (isInitial) {
-      setIsLoading(true)
-      setError(null)
-    }
-
-    try {
-      const [sortBy, order] = sortOption.startsWith('title')
-        ? ['filename', sortOption.endsWith('asc') ? 'asc' : 'desc']
-        : sortOption.startsWith('size')
-        ? ['size', 'desc']
-        : ['date', sortOption.endsWith('asc') ? 'asc' : 'desc']
-
-      const result = await fetchPhotos({
-        limit: 50,
-        offset: 0,
-        sort: sortBy,
-        order: order,
-      })
-
-      setPhotos(result.photos)
-      setTotalPhotos(result.total)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load photos'
-      setError(msg)
-    } finally {
-      if (isInitial) {
-        setIsLoading(false)
-      }
-    }
-  }, [sortOption])
-
-  useEffect(() => {
-    loadPhotos(true)
-  }, [loadPhotos])
-
-  // Load more photos (pagination)
-  const handleLoadMore = async () => {
-    if (isLoadingMore || photos.length >= totalPhotos) return
-    setIsLoadingMore(true)
-
-    try {
-      const [sortBy, order] = sortOption.startsWith('title')
-        ? ['filename', sortOption.endsWith('asc') ? 'asc' : 'desc']
-        : sortOption.startsWith('size')
-        ? ['size', 'desc']
-        : ['date', sortOption.endsWith('asc') ? 'asc' : 'desc']
-
-      const result = await fetchPhotos({
-        limit: 50,
-        offset: photos.length,
-        sort: sortBy,
-        order: order,
-      })
-
-      setPhotos((prev) => [...prev, ...result.photos])
-      setTotalPhotos(result.total)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load more photos'
-      setError(msg)
-    } finally {
-      setIsLoadingMore(false)
-    }
-  }
-
-  // Trigger media scanner and poll progress
-  const handleScan = async () => {
-    if (isScanning) return
-    setIsScanning(true)
-    setScanResult(null)
-
-    try {
-      const initial = await triggerScan(false)
-      if (initial.status === 'completed' || initial.status === 'failed') {
-        setScanResult(initial)
-        setIsScanning(false)
-        loadPhotos(false)
-        return
-      }
-
-      // Poll scan status until completed
-      const pollInterval = window.setInterval(async () => {
-        try {
-          const current = await fetchScanStatus()
-          if (current.status === 'completed' || current.status === 'failed') {
-            window.clearInterval(pollInterval)
-            setScanResult(current)
-            setIsScanning(false)
-            loadPhotos(false)
-          }
-        } catch {
-          window.clearInterval(pollInterval)
-          setIsScanning(false)
-        }
-      }, 1200)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to initiate scan'
-      setError(msg)
-      setIsScanning(false)
-    }
-  }
+  const {
+    photos,
+    totalPhotos,
+    isLoading,
+    isLoadingMore,
+    error,
+    sortOption,
+    setSortOption,
+    viewMode,
+    setViewMode,
+    searchQuery,
+    setSearchQuery,
+    isScanning,
+    scanResult,
+    setScanResult,
+    loadPhotos,
+    loadMore,
+    handleScan,
+  } = usePhotos()
 
   // Filter photos client-side for search and folder
   const filteredPhotos = useMemo(() => {
@@ -230,7 +134,7 @@ export function PhotosPage({
         onSortChange={setSortOption}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
-        totalCount={totalPhotos}
+        totalCount={folderFilter ? filteredPhotos.length : totalPhotos}
         onScanClick={handleScan}
         isScanning={isScanning}
       />
@@ -238,6 +142,21 @@ export function PhotosPage({
       {/* Gallery Content Area */}
       {isLoading ? (
         <LoadingState viewMode={viewMode} />
+      ) : folderFilter && filteredPhotos.length === 0 ? (
+        <div className="flex flex-col items-center justify-center p-14 text-center border border-dashed border-border rounded-2xl bg-card/40 my-8">
+          <div className="flex items-center justify-center w-14 h-14 rounded-full bg-primary/10 text-primary mb-4">
+            <FolderOpen className="w-7 h-7 stroke-[1.5]" />
+          </div>
+          <h3 className="text-lg font-semibold text-foreground mb-1">No photos in this album</h3>
+          <p className="text-sm text-muted-foreground max-w-md mb-5 leading-relaxed">
+            This album has no assigned photos yet. Full album organization and assigning photos to albums is planned for Phase 4.
+          </p>
+          {onClearFolderFilter && (
+            <Button onClick={onClearFolderFilter} size="md">
+              View all photos
+            </Button>
+          )}
+        </div>
       ) : filteredPhotos.length === 0 ? (
         <EmptyState
           isSearch={Boolean(searchQuery.trim())}
@@ -260,12 +179,12 @@ export function PhotosPage({
             ))}
           </div>
 
-          {photos.length < totalPhotos && (
+          {!folderFilter && photos.length < totalPhotos && (
             <div className="flex justify-center pt-6 pb-2">
               <Button
                 variant="outline"
                 size="md"
-                onClick={handleLoadMore}
+                onClick={loadMore}
                 disabled={isLoadingMore}
                 className="gap-2"
               >
@@ -292,12 +211,12 @@ export function PhotosPage({
             ))}
           </div>
 
-          {photos.length < totalPhotos && (
+          {!folderFilter && photos.length < totalPhotos && (
             <div className="flex justify-center pt-6 pb-2">
               <Button
                 variant="outline"
                 size="md"
-                onClick={handleLoadMore}
+                onClick={loadMore}
                 disabled={isLoadingMore}
                 className="gap-2"
               >

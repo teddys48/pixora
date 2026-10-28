@@ -28,12 +28,13 @@ export function PhotoCard({ photo, onSelect, viewMode = 'grid' }: PhotoCardProps
         className="group flex items-center justify-between p-3 rounded-xl border border-border bg-card hover:bg-muted/40 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <div className="flex items-center gap-4 min-w-0">
-          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden shrink-0 border border-border/50">
+          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden shrink-0 border border-border/50 bg-muted/40 flex items-center justify-center">
             <FallbackImage
               src={photo.thumbnailUrl}
               alt={photo.title}
               aspectRatio="square"
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+              className="w-full h-full flex items-center justify-center"
+              imgClassName="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
             />
           </div>
           <div className="min-w-0">
@@ -80,16 +81,17 @@ export function PhotoCard({ photo, onSelect, viewMode = 'grid' }: PhotoCardProps
       onKeyDown={handleKeyDown}
       className="group relative flex flex-col rounded-xl overflow-hidden border border-border/70 bg-card hover:border-border transition-all duration-300 hover:shadow-lg cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      {/* Thumbnail Container */}
-      <div className="relative aspect-[4/3] w-full overflow-hidden bg-muted/40">
+      {/* Thumbnail Container: uniform 4:3 card with object-contain to preserve original aspect ratio */}
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-muted/40 flex items-center justify-center">
         <FallbackImage
           src={photo.thumbnailUrl}
           alt={photo.title}
-          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
+          className="w-full h-full flex items-center justify-center"
+          imgClassName="w-full h-full object-contain group-hover:scale-105 transition-transform duration-500 ease-out"
         />
 
         {/* Hover overlay with quick preview indicator */}
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center p-3">
+        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center p-3 pointer-events-none">
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/70 text-white text-xs font-medium backdrop-blur-sm shadow-sm">
             <Maximize2 className="w-3.5 h-3.5" />
             <span>View</span>

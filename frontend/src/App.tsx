@@ -7,16 +7,16 @@ import { FoldersPage } from '@/pages/FoldersPage'
 import { LightboxModal } from '@/components/gallery/LightboxModal'
 import { Photo } from '@/types/photo'
 import { Folder } from '@/types/folder'
-import { MOCK_PHOTOS } from '@/data/mock/photos'
+import { PhotosProvider, usePhotos } from '@/context/PhotosContext'
 
-export function App() {
+function AppContent() {
   const navigate = useNavigate()
+  const { refreshPhotos } = usePhotos()
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null)
-  const [activePhotosList, setActivePhotosList] = useState<Photo[]>(MOCK_PHOTOS)
+  const [activePhotosList, setActivePhotosList] = useState<Photo[]>([])
   const [isLightboxOpen, setIsLightboxOpen] = useState(false)
   const [folderFilter, setFolderFilter] = useState<string | null>(null)
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
-  const [uploadRefreshKey, setUploadRefreshKey] = useState(0)
 
   const handleSelectPhoto = (photo: Photo, list: Photo[]) => {
     setSelectedPhoto(photo)
@@ -34,8 +34,8 @@ export function App() {
   }
 
   const handleUploadSuccess = () => {
-    // Trigger gallery reload
-    setUploadRefreshKey((k) => k + 1)
+    // Trigger gallery and timeline reload
+    refreshPhotos()
   }
 
   return (
@@ -50,7 +50,6 @@ export function App() {
           path="/"
           element={
             <PhotosPage
-              key={uploadRefreshKey}
               onSelectPhoto={handleSelectPhoto}
               onUploadClick={() => setIsUploadModalOpen(true)}
               folderFilter={folderFilter}
@@ -62,7 +61,6 @@ export function App() {
           path="/photos"
           element={
             <PhotosPage
-              key={uploadRefreshKey}
               onSelectPhoto={handleSelectPhoto}
               onUploadClick={() => setIsUploadModalOpen(true)}
               folderFilter={folderFilter}
@@ -83,7 +81,6 @@ export function App() {
           path="*"
           element={
             <PhotosPage
-              key={uploadRefreshKey}
               onSelectPhoto={handleSelectPhoto}
               onUploadClick={() => setIsUploadModalOpen(true)}
             />
@@ -100,6 +97,14 @@ export function App() {
         onNavigate={(nextPhoto) => setSelectedPhoto(nextPhoto)}
       />
     </AppLayout>
+  )
+}
+
+export function App() {
+  return (
+    <PhotosProvider>
+      <AppContent />
+    </PhotosProvider>
   )
 }
 

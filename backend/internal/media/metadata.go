@@ -159,6 +159,11 @@ func ExtractMetadata(r io.ReadSeeker) (ImageInfo, error) {
 		}
 	}
 
+	// For orientations 5, 6, 7, 8 (90 or 270 degree rotation), swap display width and height
+	if info.Orientation >= 5 && info.Orientation <= 8 {
+		info.Width, info.Height = info.Height, info.Width
+	}
+
 	return info, nil
 }
 

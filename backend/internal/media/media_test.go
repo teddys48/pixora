@@ -155,7 +155,10 @@ func TestThumbnailService(t *testing.T) {
 		t.Fatalf("Failed to init storage: %v", err)
 	}
 
-	// Write test original image
+	thumbSvc := media.NewThumbnailService(store)
+	ctx := context.Background()
+
+	// 1. Landscape 800x600 (4:3) -> should scale to 400x300
 	origRel := "originals/test_orig.jpg"
 	origAbs, err := store.ResolvePath(origRel)
 	if err != nil {
@@ -170,9 +173,6 @@ func TestThumbnailService(t *testing.T) {
 		t.Fatalf("Failed to write original image: %v", err)
 	}
 
-	thumbSvc := media.NewThumbnailService(store)
-	ctx := context.Background()
-
 	p := &models.Photo{
 		ID:               "thumb-test-1",
 		RelativePath:     origRel,
@@ -182,7 +182,6 @@ func TestThumbnailService(t *testing.T) {
 		FileModifiedAt:   time.Now().UTC(),
 	}
 
-	// 1. Generate thumbnail
 	thumbPath, err := thumbSvc.GetOrGenerate(ctx, p)
 	if err != nil {
 		t.Fatalf("Failed to generate thumbnail: %v", err)
@@ -193,7 +192,6 @@ func TestThumbnailService(t *testing.T) {
 		t.Fatalf("Thumbnail not created or empty: %v", err)
 	}
 
-	// 2. Decode generated thumbnail and verify dimensions
 	thumbData, err := os.ReadFile(thumbPath)
 	if err != nil {
 		t.Fatalf("Failed to read thumbnail file: %v", err)
@@ -205,12 +203,59 @@ func TestThumbnailService(t *testing.T) {
 	if format != "jpeg" {
 		t.Errorf("Expected thumbnail format jpeg, got %s", format)
 	}
-	// Aspect ratio of 800x600 is 4:3. In 400x400 box -> 400x300
 	if thumbCfg.Width != 400 || thumbCfg.Height != 300 {
-		t.Errorf("Expected thumbnail dimensions 400x300, got %dx%d", thumbCfg.Width, thumbCfg.Height)
+		t.Errorf("Expected landscape thumbnail dimensions 400x300, got %dx%d", thumbCfg.Width, thumbCfg.Height)
 	}
 
-	// 3. Repeated call should return cached path without error
+	// 2. Portrait 600x800 (3:4) -> should scale to 300x400
+	portRel := "originals/test_portrait.jpg"
+	portAbs, _ := store.ResolvePath(portRel)
+	portBytes := createTestJPEG(600, 800)
+	_ = os.WriteFile(portAbs, portBytes, 0644)
+
+	pPort := &models.Photo{
+		ID:               "thumb-test-portrait",
+		RelativePath:     portRel,
+		OriginalFilename: "test_portrait.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         int64(len(portBytes)),
+		FileModifiedAt:   time.Now().UTC(),
+	}
+	portThumbPath, err := thumbSvc.GetOrGenerate(ctx, pPort)
+	if err != nil {
+		t.Fatalf("Failed to generate portrait thumbnail: %v", err)
+	}
+	portThumbData, _ := os.ReadFile(portThumbPath)
+	portCfg, _, _ := image.DecodeConfig(bytes.NewReader(portThumbData))
+	if portCfg.Width != 300 || portCfg.Height != 400 {
+		t.Errorf("Expected portrait thumbnail dimensions 300x400, got %dx%d", portCfg.Width, portCfg.Height)
+	}
+
+	// 3. Panoramic 1200x400 (3:1) -> should scale to 400x133
+	panoRel := "originals/test_pano.jpg"
+	panoAbs, _ := store.ResolvePath(panoRel)
+	panoBytes := createTestJPEG(1200, 400)
+	_ = os.WriteFile(panoAbs, panoBytes, 0644)
+
+	pPano := &models.Photo{
+		ID:               "thumb-test-pano",
+		RelativePath:     panoRel,
+		OriginalFilename: "test_pano.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         int64(len(panoBytes)),
+		FileModifiedAt:   time.Now().UTC(),
+	}
+	panoThumbPath, err := thumbSvc.GetOrGenerate(ctx, pPano)
+	if err != nil {
+		t.Fatalf("Failed to generate pano thumbnail: %v", err)
+	}
+	panoThumbData, _ := os.ReadFile(panoThumbPath)
+	panoCfg, _, _ := image.DecodeConfig(bytes.NewReader(panoThumbData))
+	if panoCfg.Width != 400 || panoCfg.Height != 133 {
+		t.Errorf("Expected panoramic thumbnail dimensions 400x133, got %dx%d", panoCfg.Width, panoCfg.Height)
+	}
+
+	// 4. Repeated call should return cached path without error
 	secondPath, err := thumbSvc.GetOrGenerate(ctx, p)
 	if err != nil {
 		t.Fatalf("Failed on repeated thumbnail call: %v", err)

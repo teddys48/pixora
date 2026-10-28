@@ -17,6 +17,7 @@ export interface Photo {
   thumbnailUrl: string
   fallbackDataUrl?: string
   date: string // ISO string: e.g. "2026-10-18T14:32:00Z"
+  takenAt?: string // EXIF capture date if available
   size: number // file size in bytes
   folderId?: string
   tags?: string[]
