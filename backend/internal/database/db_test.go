@@ -52,14 +52,14 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		t.Fatalf("Expected db file to exist at %s, got: %v", dbPath, err)
 	}
 
-	// Verify schema_migrations has version 1 recorded
+	// Verify schema_migrations has version 1 and 2 recorded
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = 1").Scan(&count)
+	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2)").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to query schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("Expected migration 1 to be recorded, got count %d", count)
+	if count != 2 {
+		t.Errorf("Expected migrations 1 and 2 to be recorded, got count %d", count)
 	}
 
 	// Verify tables exist
@@ -78,6 +78,7 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		"idx_photos_created_at",
 		"idx_photos_relative_path",
 		"idx_albums_name",
+		"idx_albums_name_nocase",
 		"idx_photo_albums_album_id",
 		"idx_photo_albums_photo_id",
 	}
@@ -206,6 +207,25 @@ func TestDatabaseUniqueConstraints(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "unique") {
 		t.Errorf("Expected UNIQUE constraint error, got: %v", err)
+	}
+
+	// Test album case-insensitive unique name constraint
+	_, err = db.Exec(`INSERT INTO albums (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+		"alb-1", "Holidays", now, now,
+	)
+	if err != nil {
+		t.Fatalf("Failed to insert first album: %v", err)
+	}
+
+	// Insert duplicate album name with different casing must fail
+	_, err = db.Exec(`INSERT INTO albums (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+		"alb-2", "holidays", now, now,
+	)
+	if err == nil {
+		t.Fatalf("Expected unique constraint violation on case-insensitive album name, got nil")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "unique") {
+		t.Errorf("Expected UNIQUE constraint error for duplicate album name, got: %v", err)
 	}
 }
 

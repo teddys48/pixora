@@ -75,7 +75,7 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowHeaders: "Origin, Content-Type, Accept",
-		AllowMethods: "GET, POST, HEAD, OPTIONS",
+		AllowMethods: "GET, POST, HEAD, OPTIONS, PATCH, DELETE",
 	}))
 
 	// API Routes
@@ -93,6 +93,11 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 		apiGroup.Get("/albums", api.ListAlbumsHandler(deps.AlbumRepo))
 		apiGroup.Post("/albums", api.CreateAlbumHandler(deps.AlbumRepo))
 		apiGroup.Get("/albums/:id", api.GetAlbumHandler(deps.AlbumRepo))
+		apiGroup.Patch("/albums/:id", api.UpdateAlbumHandler(deps.AlbumRepo))
+		apiGroup.Delete("/albums/:id", api.DeleteAlbumHandler(deps.AlbumRepo))
+		apiGroup.Get("/albums/:id/photos", api.GetAlbumPhotosHandler(deps.AlbumRepo))
+		apiGroup.Post("/albums/:id/photos", api.AddPhotosToAlbumHandler(deps.AlbumRepo))
+		apiGroup.Delete("/albums/:id/photos/:photoId", api.RemovePhotoFromAlbumHandler(deps.AlbumRepo))
 	}
 
 	// Photo Collection and Upload routes

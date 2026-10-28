@@ -57,6 +57,13 @@ CREATE INDEX IF NOT EXISTS idx_photo_albums_album_id ON photo_albums(album_id);
 CREATE INDEX IF NOT EXISTS idx_photo_albums_photo_id ON photo_albums(photo_id);
 `,
 	},
+	{
+		Version: 2,
+		Name:    "case_insensitive_unique_album_names",
+		SQL: `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_name_nocase ON albums(name COLLATE NOCASE);
+`,
+	},
 }
 
 // Migrate applies all unapplied database migrations in transactional batches.

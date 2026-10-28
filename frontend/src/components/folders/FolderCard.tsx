@@ -2,14 +2,33 @@ import React from 'react'
 import { Folder } from '@/types/folder'
 import { FallbackImage } from '@/components/ui/FallbackImage'
 import { formatDate } from '@/lib/utils'
-import { Folder as FolderIcon, Images } from 'lucide-react'
+import { Folder as FolderIcon, Images, MoreVertical, Edit2, Trash2 } from 'lucide-react'
 
 interface FolderCardProps {
   folder: Folder
   onClick: (folder: Folder) => void
+  onRename?: (folder: Folder) => void
+  onDelete?: (folder: Folder) => void
 }
 
-export function FolderCard({ folder, onClick }: FolderCardProps) {
+export function FolderCard({ folder, onClick, onRename, onDelete }: FolderCardProps) {
+  const [showMenu, setShowMenu] = React.useState(false)
+  const menuRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setShowMenu(false)
+      }
+    }
+    if (showMenu) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showMenu])
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
@@ -23,7 +42,7 @@ export function FolderCard({ folder, onClick }: FolderCardProps) {
       tabIndex={0}
       onClick={() => onClick(folder)}
       onKeyDown={handleKeyDown}
-      className="group flex flex-col rounded-xl overflow-hidden border border-border/70 bg-card hover:border-border transition-all duration-300 hover:shadow-lg cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="group relative flex flex-col rounded-xl overflow-hidden border border-border/70 bg-card hover:border-border transition-all duration-300 hover:shadow-lg cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {/* Cover Image Container */}
       <div className="relative aspect-[16/10] w-full overflow-hidden bg-muted/30">
@@ -46,6 +65,55 @@ export function FolderCard({ folder, onClick }: FolderCardProps) {
             {folder.photoCount}
           </span>
         </div>
+
+        {/* Actions Button / Dropdown */}
+        {(onRename || onDelete) && (
+          <div
+            ref={menuRef}
+            className="absolute top-2.5 left-2.5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setShowMenu((prev) => !prev)}
+              aria-label="Album actions"
+              className="p-1.5 rounded-md bg-black/60 hover:bg-black/80 text-white backdrop-blur-sm transition-colors opacity-90 group-hover:opacity-100"
+            >
+              <MoreVertical className="w-3.5 h-3.5" />
+            </button>
+
+            {showMenu && (
+              <div className="absolute left-0 mt-1 w-32 rounded-lg bg-popover/95 backdrop-blur border border-border shadow-md py-1 z-20 text-xs animate-in fade-in zoom-in-95 duration-100">
+                {onRename && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMenu(false)
+                      onRename(folder)
+                    }}
+                    className="flex items-center gap-2 w-full px-3 py-1.5 text-left text-foreground hover:bg-muted/80 transition-colors"
+                  >
+                    <Edit2 className="w-3.5 h-3.5 text-muted-foreground" />
+                    <span>Rename</span>
+                  </button>
+                )}
+                {onDelete && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMenu(false)
+                      onDelete(folder)
+                    }}
+                    className="flex items-center gap-2 w-full px-3 py-1.5 text-left text-destructive hover:bg-destructive/10 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                    <span>Delete</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Folder Details */}

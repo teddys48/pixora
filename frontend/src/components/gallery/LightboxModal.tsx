@@ -31,7 +31,7 @@ export function LightboxModal({
   onClose,
   onNavigate,
 }: LightboxModalProps) {
-  const [showInfo, setShowInfo] = useState(true)
+  const [showInfo, setShowInfo] = useState(false)
 
   const currentIndex = photo ? photos.findIndex((p) => p.id === photo.id) : -1
   const hasPrev = currentIndex > 0
@@ -48,6 +48,13 @@ export function LightboxModal({
       onNavigate(photos[currentIndex + 1])
     }
   }, [hasNext, photos, currentIndex, onNavigate])
+
+  // Reset showInfo to default off whenever the lightbox is opened
+  useEffect(() => {
+    if (isOpen) {
+      setShowInfo(false)
+    }
+  }, [isOpen])
 
   useEffect(() => {
     if (!isOpen) return
@@ -244,11 +251,13 @@ export function LightboxModal({
         )}
       </div>
 
-      {/* Mobile Bottom Info Strip */}
-      <div className="md:hidden flex items-center justify-between px-4 py-2 bg-neutral-900/90 border-t border-white/10 text-xs text-neutral-300">
-        <span className="truncate max-w-[200px]">{photo.title}</span>
-        <span className="font-mono text-[11px] text-neutral-400">{formatBytes(photo.size)}</span>
-      </div>
+      {/* Mobile Bottom Info Strip: shown only if showInfo is active */}
+      {showInfo && (
+        <div className="md:hidden flex items-center justify-between px-4 py-2 bg-neutral-900/90 border-t border-white/10 text-xs text-neutral-300">
+          <span className="truncate max-w-[200px]">{photo.title}</span>
+          <span className="font-mono text-[11px] text-neutral-400">{formatBytes(photo.size)}</span>
+        </div>
+      )}
     </div>
   )
 }

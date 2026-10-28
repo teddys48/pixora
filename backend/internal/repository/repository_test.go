@@ -200,19 +200,29 @@ func TestAlbumRepositoryCRUDAndPhotos(t *testing.T) {
 	photoRepo := repository.NewSQLitePhotoRepository(db)
 	ctx := context.Background()
 
-	// Create photo
-	photo := &models.Photo{
+	// Create 2 photos
+	p1 := &models.Photo{
 		ID:               "photo-100",
-		RelativePath:     "originals/album_photo.jpg",
-		OriginalFilename: "album_photo.jpg",
+		RelativePath:     "originals/album_photo1.jpg",
+		OriginalFilename: "album_photo1.jpg",
 		MediaType:        "image/jpeg",
 		FileSize:         1000,
 	}
-	if err := photoRepo.Create(ctx, photo); err != nil {
-		t.Fatalf("Failed to create photo: %v", err)
+	p2 := &models.Photo{
+		ID:               "photo-101",
+		RelativePath:     "originals/album_photo2.jpg",
+		OriginalFilename: "album_photo2.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         2000,
+	}
+	if err := photoRepo.Create(ctx, p1); err != nil {
+		t.Fatalf("Failed to create p1: %v", err)
+	}
+	if err := photoRepo.Create(ctx, p2); err != nil {
+		t.Fatalf("Failed to create p2: %v", err)
 	}
 
-	// Create album
+	// 1. Create album
 	album := &models.Album{
 		ID:          "album-100",
 		Name:        "Summer Trip",
@@ -222,69 +232,130 @@ func TestAlbumRepositoryCRUDAndPhotos(t *testing.T) {
 		t.Fatalf("Failed to create album: %v", err)
 	}
 
-	// Duplicate create should return ErrConflict
-	if err := albumRepo.Create(ctx, album); !errors.Is(err, repository.ErrConflict) {
-		t.Errorf("Expected ErrConflict on duplicate album create, got: %v", err)
+	// 2. Duplicate album name (case-insensitive) should return ErrConflict
+	dupAlbum := &models.Album{
+		ID:   "album-dup",
+		Name: "summer trip",
+	}
+	if err := albumRepo.Create(ctx, dupAlbum); !errors.Is(err, repository.ErrConflict) {
+		t.Errorf("Expected ErrConflict on duplicate case-insensitive album name, got: %v", err)
 	}
 
-	// List albums (initial photo count should be 0)
+	// 3. List albums (initial photo count should be 0, no cover thumbnail)
 	albums, err := albumRepo.List(ctx)
 	if err != nil {
 		t.Fatalf("Failed to list albums: %v", err)
 	}
-	if len(albums) != 1 || albums[0].PhotoCount != 0 {
-		t.Errorf("Expected 1 album with photoCount 0, got %+v", albums)
+	if len(albums) != 1 || albums[0].PhotoCount != 0 || albums[0].CoverPhotoID != nil {
+		t.Errorf("Expected 1 album with photoCount 0 and nil cover, got %+v", albums)
 	}
 
-	// Add photo to album
-	if err := albumRepo.AddPhoto(ctx, photo.ID, album.ID); err != nil {
-		t.Fatalf("Failed to add photo to album: %v", err)
+	// 4. Batch add photos via AddPhotos
+	added, err := albumRepo.AddPhotos(ctx, album.ID, []string{p1.ID, p2.ID})
+	if err != nil {
+		t.Fatalf("Failed to add photos to album: %v", err)
+	}
+	if added != 2 {
+		t.Errorf("Expected 2 added photos, got %d", added)
 	}
 
-	// Duplicate add photo should return ErrConflict
-	if err := albumRepo.AddPhoto(ctx, photo.ID, album.ID); !errors.Is(err, repository.ErrConflict) {
-		t.Errorf("Expected ErrConflict on duplicate photo add, got: %v", err)
+	// 5. Batch add duplicate photo associations: should not error and return 0 newly added
+	addedDup, err := albumRepo.AddPhotos(ctx, album.ID, []string{p1.ID})
+	if err != nil {
+		t.Fatalf("Failed on duplicate AddPhotos: %v", err)
+	}
+	if addedDup != 0 {
+		t.Errorf("Expected 0 added for duplicate, got %d", addedDup)
 	}
 
-	// Adding non-existent photo or album should return ErrNotFound
-	if err := albumRepo.AddPhoto(ctx, "invalid-photo", album.ID); !errors.Is(err, repository.ErrNotFound) {
-		t.Errorf("Expected ErrNotFound for invalid photo, got: %v", err)
+	// 6. Non-existent photo ID in AddPhotos returns ErrNotFound
+	_, err = albumRepo.AddPhotos(ctx, album.ID, []string{"nonexistent-photo"})
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("Expected ErrNotFound for non-existent photo ID in AddPhotos, got: %v", err)
 	}
 
-	// Verify photoCount updated in GetByID
+	// 7. Verify photoCount and cover thumbnail updated in GetByID
 	fetchedAlbum, err := albumRepo.GetByID(ctx, album.ID)
 	if err != nil {
 		t.Fatalf("Failed to get album: %v", err)
 	}
-	if fetchedAlbum.PhotoCount != 1 {
-		t.Errorf("Expected photoCount 1, got %d", fetchedAlbum.PhotoCount)
+	if fetchedAlbum.PhotoCount != 2 {
+		t.Errorf("Expected photoCount 2, got %d", fetchedAlbum.PhotoCount)
+	}
+	if fetchedAlbum.CoverPhotoID == nil || fetchedAlbum.CoverThumbnailURL == nil {
+		t.Fatalf("Expected non-nil cover photo and thumbnail URL, got nil")
 	}
 
-	// Get photos in album
+	// 8. Get photos in album with pagination
 	albumPhotos, total, err := albumRepo.GetPhotos(ctx, album.ID, 0, 10)
 	if err != nil {
 		t.Fatalf("Failed to get photos in album: %v", err)
 	}
-	if total != 1 || len(albumPhotos) != 1 || albumPhotos[0].ID != photo.ID {
+	if total != 2 || len(albumPhotos) != 2 {
 		t.Errorf("Unexpected album photos: %+v, total: %d", albumPhotos, total)
 	}
 
-	// Remove photo from album
-	if err := albumRepo.RemovePhoto(ctx, photo.ID, album.ID); err != nil {
+	// 9. Get photos for nonexistent album returns ErrNotFound
+	_, _, err = albumRepo.GetPhotos(ctx, "nonexistent-album", 0, 10)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Errorf("Expected ErrNotFound when getting photos for nonexistent album, got: %v", err)
+	}
+
+	// 10. Update/Rename album
+	fetchedAlbum.Name = "Winter Trip"
+	fetchedAlbum.Description = "Updated winter photos"
+	if err := albumRepo.Update(ctx, fetchedAlbum); err != nil {
+		t.Fatalf("Failed to update album: %v", err)
+	}
+	renamedAlbum, err := albumRepo.GetByID(ctx, album.ID)
+	if err != nil {
+		t.Fatalf("Failed to get renamed album: %v", err)
+	}
+	if renamedAlbum.Name != "Winter Trip" || renamedAlbum.Description != "Updated winter photos" {
+		t.Errorf("Rename mismatch: got %+v", renamedAlbum)
+	}
+
+	// 11. Rename collision should return ErrConflict
+	secondAlbum := &models.Album{
+		ID:   "album-200",
+		Name: "Autumn Trip",
+	}
+	if err := albumRepo.Create(ctx, secondAlbum); err != nil {
+		t.Fatalf("Failed to create second album: %v", err)
+	}
+	secondAlbum.Name = "winter trip" // Case-insensitive collision with first album
+	if err := albumRepo.Update(ctx, secondAlbum); !errors.Is(err, repository.ErrConflict) {
+		t.Errorf("Expected ErrConflict on renaming to duplicate name, got: %v", err)
+	}
+
+	// 12. Remove photo from album
+	if err := albumRepo.RemovePhoto(ctx, p1.ID, album.ID); err != nil {
 		t.Fatalf("Failed to remove photo from album: %v", err)
 	}
 
+	// Verify original photo in photos table is STILL present
+	originalPhoto, err := photoRepo.GetByID(ctx, p1.ID)
+	if err != nil || originalPhoto == nil {
+		t.Fatalf("Removing photo from album must NOT delete the original photo, got err: %v", err)
+	}
+
 	// Remove again should return ErrNotFound
-	if err := albumRepo.RemovePhoto(ctx, photo.ID, album.ID); !errors.Is(err, repository.ErrNotFound) {
+	if err := albumRepo.RemovePhoto(ctx, p1.ID, album.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Errorf("Expected ErrNotFound on second remove, got: %v", err)
 	}
 
-	// Delete album
+	// 13. Delete album
 	if err := albumRepo.Delete(ctx, album.ID); err != nil {
 		t.Fatalf("Failed to delete album: %v", err)
 	}
 	_, err = albumRepo.GetByID(ctx, album.ID)
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Errorf("Expected ErrNotFound for deleted album, got: %v", err)
+	}
+
+	// Verify original photos are STILL present in photos repository after album deletion
+	p2Fetched, err := photoRepo.GetByID(ctx, p2.ID)
+	if err != nil || p2Fetched == nil {
+		t.Errorf("Deleting album must NOT delete original photo records, got err: %v", err)
 	}
 }

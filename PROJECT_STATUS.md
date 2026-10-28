@@ -3,10 +3,10 @@
 ## 1. Project Overview
 
 **Project:** Pixora  
-**Description:** A simple web-based photo gallery for uploading photos, managing folders, and browsing photos by timeline.
+**Description:** A simple web-based photo gallery for uploading photos, managing virtual albums and folders, and browsing photos by timeline.
 
-**Current overall status:** Phase 3 Bug Audit & UI Fixes Complete — Ready for Phase 4  
-**Current phase:** Phase 3 — Photo Management, Media Scanning & Upload (Audited & Refined)
+**Current overall status:** Phase 4 Complete — Virtual Albums & Folder Management  
+**Current phase:** Phase 4 — Virtual Albums & Folder Management
 
 ### Product Goals
 
@@ -37,12 +37,12 @@ Authentication and access control must be reconsidered before exposing the appli
 
 | Component | Decision | Status | Notes |
 |---|---|---|---|
-| Frontend | React 18 + TypeScript + Vite | Implemented | Strict TypeScript, component modularity, centralized PhotosContext |
+| Frontend | React 18 + TypeScript + Vite | Implemented | Strict TypeScript, component modularity, centralized PhotosContext, AlbumDetailView |
 | UI styling | Tailwind CSS + semantic tokens | Implemented | Light/dark CSS tokens, custom scrollbars, aspect-ratio preservation |
-| Icons | Lucide React | Implemented | Standard SVG icons across shell & actions |
-| Routing | React Router v6 | Implemented | Client-side routing with Go SPA fallback |
+| Icons | Lucide React | Implemented | Standard SVG icons across shell, cards, modals & actions |
+| Routing | React Router v6 | Implemented | Client-side routing with Go SPA fallback (`/`, `/photos`, `/timeline`, `/folders`, `/folders/:albumId`) |
 | Backend | Go 1.22+ + Fiber v2 | Implemented | Package separation (config, storage, database, repository, api, server, media, scanner) |
-| Database | SQLite via `modernc.org/sqlite` | Implemented | Pure Go (CGO_ENABLED=0), WAL mode, foreign keys, versioned migrations |
+| Database | SQLite via `modernc.org/sqlite` | Implemented | Pure Go (CGO_ENABLED=0), WAL mode, foreign keys, versioned migrations (Migration 1 & 2) |
 | Image Processing | Pure-Go decoders & bilinear scaling | Implemented | `image/jpeg`, `image/png`, `image/gif`, `golang.org/x/image/webp`, `golang.org/x/image/tiff`, `golang.org/x/image/draw` |
 | EXIF Parser | `github.com/rwcarlsen/goexif` | Implemented | Pure Go, extracts `DateTimeOriginal`, timestamps, and orientation tags (1-8); orientation transforms applied to thumbnails |
 | Photo storage | Local host bind mount (`/media`) | Implemented | Target `STORAGE_ROOT=/media`; safe path traversal checks; read-only mount tolerated |
@@ -145,74 +145,64 @@ Scope & Acceptance Criteria Met:
   - Loading skeleton state and error state with retry button.
   - Incremental pagination ("Load More Photos").
   - LightboxModal connected to real photo URLs and metadata.
-- [x] **Automated Testing:**
-  - 27 Go tests passing across `api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, and `storage`.
-  - Frontend TypeScript verification and production build passing cleanly (0 errors).
 
-### Phase 3 Bug Audit & UI Fixes
+### Phase 4 — Virtual Albums & Folder Management
 
 **Status:** Completed
 
-Following the Phase 3 implementation, an audit was conducted on three reported issues:
-
-1. **Issue A — Manual Media Scanning:**
-   - **Audit finding:** Expected current-phase behavior for Phase 3. The absence of automatic startup scanning or background filesystem watchers is by design in Phase 3.
-   - **Verification:**
-     - Scan button invokes `POST /api/photos/scan` correctly.
-     - Backend scans the dynamically configured `STORAGE_ROOT` (`internal/scanner`), rejecting traversal or symlink escapes.
-     - Scan results accurately report indexed, skipped, updated, and failed files.
-     - Scan completion automatically triggers a gallery refresh without a browser reload.
-     - Concurrency locking prevents duplicate scan jobs (`409 Conflict`).
-     - Safe deduplication guarantees no duplicate database entries on repeat scans.
-     - Read-only storage roots are supported for scanning without write permissions.
-   - **Decision:** Kept manual scanning as expected behavior for Phase 3 without adding unauthorized watchers or scheduled background jobs.
-
-2. **Issue B — Photos Missing from Timeline and Folder Tabs:**
-   - **Audit finding:** Real bug and architectural disconnect.
-     - `TimelinePage.tsx` was directly importing and displaying static `MOCK_PHOTOS` from Phase 1, never requesting or rendering real photos from SQLite.
-     - `FoldersPage.tsx` was using in-memory `MOCK_FOLDERS` and creating volatile client-side folders without connecting to the existing backend `/api/albums` endpoints.
-     - Photo state was fragmented across components rather than having a consistent source of truth.
-   - **Root Causes:**
-     - Missing centralized state management for photos across tabs.
-     - `TimelinePage` and `FoldersPage` were not migrated from Phase 1 mock data when Phase 3 backend APIs were introduced.
-     - Photo assignment to albums is a planned Phase 4 feature, but the UI displayed mock albums with mock Unsplash covers, confusing users when scanned photos did not appear inside them.
-   - **Fixes Applied:**
-     - Implemented `PhotosContext` (`PhotosProvider` in `frontend/src/context/PhotosContext.tsx`) as the single source of truth for photo listing, sorting, pagination, search query, and scan state.
-     - Updated `App.tsx` to provide `PhotosProvider` to all pages and removed `MOCK_PHOTOS` initialization.
-     - Connected `TimelinePage.tsx` to real photo data via `usePhotos()`.
-     - Filtered photos in `TimelinePage` strictly by verified EXIF capture dates (`takenAt` / `DateTimeOriginal`), explicitly refusing to invent capture dates for photos without EXIF.
-     - Added clear Phase 5 Preview badges and status notices to `TimelinePage.tsx` explaining current EXIF-based grouping and future timeline features.
-     - Connected `FoldersPage.tsx` to real backend endpoints (`fetchAlbums()` and `createAlbum()` in `frontend/src/lib/api.ts`), persisting albums to SQLite.
-     - Added clear Phase 4 Preview badges and status notices to `FoldersPage.tsx` explaining that album photo assignment is coming in Phase 4.
-     - Added friendly empty state in `PhotosPage` when an album has 0 photos.
-
-3. **Issue C — Photos Appear Excessively Zoomed In or Incorrectly Cropped:**
-   - **Audit finding:** Real bug spanning thumbnail generation and frontend CSS layout.
-     - Backend `ThumbnailService.generateThumbnail` decoded images with `image.Decode`, but never called `ApplyOrientation()`. Smartphone portrait photos with orientation 6 or 8 were generated as landscape thumbnails (400x300 instead of 300x400) without EXIF orientation tags, rendering sideways in the browser.
-     - `ExtractMetadata` did not swap dimensions when orientation was 5, 6, 7, or 8, resulting in incorrect width and height stored in SQLite.
-     - In `FallbackImage.tsx`, the `className` prop was passed to the wrapper `<div>` while the inner `<img>` had hardcoded `object-cover`. When `LightboxModal` passed `object-contain`, it was ignored and `object-cover` forced full-bleed cropping.
-     - In `PhotoCard.tsx`, portrait and panoramic photos in `aspect-[4/3]` with `object-cover` were aggressively cropped (losing up to 50% of the image height or width), making subjects appear excessively zoomed in.
-   - **Fixes Applied:**
-     - Updated `ThumbnailService.generateThumbnail` (`backend/internal/media/thumbnail.go`) to inspect `io.ReadSeeker` for EXIF orientation and invoke `ApplyOrientation(srcImg, orientation)` before scaling.
-     - Updated `ExtractMetadata` (`backend/internal/media/metadata.go`) to swap `Width` and `Height` for orientations 5 through 8.
-     - Updated `FallbackImage.tsx` to support `imgClassName` and inherit `object-contain` for proper image fitting.
-     - Updated `PhotoCard.tsx` (grid and list views) to use `w-full h-full object-contain` within uniform `aspect-[4/3]` cards, preserving original aspect ratios of portrait, landscape, square, and panoramic photos without cropping or distortion.
-     - Updated `LightboxModal.tsx` to apply `object-contain` to the full-size image within viewport constraints (`max-h-[82vh] max-w-[88vw]`).
-     - Added unit tests in `media_test.go` verifying portrait (600x800 -> 300x400) and panoramic (1200x400 -> 400x133) thumbnail generation.
-
-### Phase 4 — Folder Management
-
-**Status:** Planned (Next Phase)
-
-Scope reserved for Phase 4:
-- Full persistent folder/album CRUD (update, delete).
-- Assigning and moving photos to folders via API and UI.
-- Setting album cover photo.
-- Deletion policy for folders containing photos.
+Scope & Acceptance Criteria Met:
+- [x] **Database Schema & Migrations:**
+  - Migration 2 added: `CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_name_nocase ON albums(name COLLATE NOCASE);`
+  - Enforced case-insensitive uniqueness for album names.
+  - Maintained foreign keys on `photo_albums` with `ON DELETE CASCADE`.
+  - Preserved existing photos and migration history without rebuilding database.
+- [x] **Repository Layer Enhancements (`internal/repository/album.go`):**
+  - Implemented `Update(ctx, album)` with case-insensitive name conflict detection (`ErrConflict`) and updated timestamp.
+  - Implemented `Delete(ctx, id)` safely removing album records and associations while keeping photos table and original media files untouched.
+  - Implemented `AddPhotos(ctx, albumID, photoIDs)` inside atomic database transactions (`BeginTx`). Verifies album and photo existence, safely prevents duplicate associations, and updates album `updated_at`.
+  - Implemented `RemovePhoto(ctx, photoID, albumID)` removing association without deleting photo from SQLite or disk.
+  - Implemented `GetByID` and `List` with dynamically computed `photo_count` and latest photo `cover_photo_id`/`cover_thumbnail_url`.
+  - Implemented `GetPhotos(ctx, albumID, offset, limit)` with deterministic ordering (`pa.added_at DESC, p.id ASC`), pagination, and 404 verification for nonexistent albums.
+- [x] **Backend REST API Endpoints (`internal/api/albums.go`):**
+  - `GET /api/albums` — Lists virtual albums with photo counts, cover thumbnails, search filtering (`?search=...`), and sorting (`?sort=name|photos|updated|created&order=asc|desc`).
+  - `POST /api/albums` — Creates a virtual album with validation (non-empty name, max 100 chars) and `409 Conflict` on duplicate names.
+  - `GET /api/albums/:id` — Retrieves album details, returning `404 Not Found` for nonexistent albums.
+  - `PATCH /api/albums/:id` — Renames or updates an album with validation and conflict checking.
+  - `DELETE /api/albums/:id` — Safely deletes an album without deleting photos from the library or files from `STORAGE_ROOT`.
+  - `GET /api/albums/:id/photos` — Paginated list of photos in an album with `url` and `thumbnailUrl`.
+  - `POST /api/albums/:id/photos` — Adds one or multiple photo IDs to an album inside a transaction.
+  - `DELETE /api/albums/:id/photos/:photoId` — Removes a photo association from an album.
+- [x] **Folder Tab UI & Album Workflow:**
+  - Connected `FoldersPage.tsx` to real backend data from `fetchAlbums()`.
+  - Album overview grid with `FolderCard`, cover thumbnails, photo count badge, and updated timestamps.
+  - Search input for filtering albums in real time.
+  - Sort dropdown for ordering albums by name (A-Z, Z-A), most photos, or recently updated.
+  - Accessible `CreateFolderModal` with client-side name validation, duplicate error feedback, and loading state.
+  - `RenameFolderModal` allowing users to rename and update descriptions for existing albums.
+  - `DeleteFolderModal` with clear safety notice that original files in `STORAGE_ROOT` and library photos are preserved.
+  - Full-featured `AlbumDetailView` for opened albums:
+    - Breadcrumbs and back navigation (`&larr; Back to Albums`).
+    - Album header with title, description, photo count badge, and action buttons.
+    - Search input within the album photos.
+    - Grid and list view modes reusing `PhotoCard`.
+    - "Remove from album" action on each card without deleting library photos.
+    - Lightbox viewer integration reusing `LightboxModal`.
+    - Incremental "Load More Photos" pagination.
+    - Clear empty state when an album contains 0 photos.
+  - Reusable `AddPhotosToAlbumModal`:
+    - Displays all indexed photos from Pixora library.
+    - Multi-select photos with visual checkmark overlay.
+    - Clearly marks photos already in the album with "In Album" badge and disables re-selection to prevent duplicates.
+    - Search filtering within available photos.
+    - Select All / Clear Selection convenience controls.
+    - Preserves user selection state on partial or failed network attempts.
+- [x] **Automated Testing:**
+  - 29 Go tests passing across all packages (`api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, `storage`), including dedicated `TestAlbumsAPI`, expanded `TestAlbumRepositoryCRUDAndPhotos`, and full server lifecycle integration `TestPhase4FullServerLifecycle`.
+  - Frontend TypeScript verification (`npm run typecheck`) and production build (`npm run build`) passing cleanly with 0 errors.
 
 ### Phase 5 — Timeline & Photo Viewer
 
-**Status:** Planned
+**Status:** Planned (Next Phase)
 
 Scope reserved for Phase 5:
 - Chronological timeline query grouped by Year and Month using real database timestamps.
@@ -234,22 +224,21 @@ Scope:
 | Area | Status | Verified Notes |
 |---|---|---|
 | Frontend scaffold | Implemented | React 18, Vite, TypeScript strict, Tailwind CSS, Lucide |
-| Backend scaffold | Implemented | Go 1.22+, Fiber v2, graceful shutdown, request logging |
+| Backend scaffold | Implemented | Go 1.22+, Fiber v2, graceful shutdown, request logging, CORS (GET, POST, PATCH, DELETE, OPTIONS, HEAD) |
 | Storage abstraction | Implemented | `internal/storage`: Safe resolution, traversal rejection, symlink checks, read-only media mount support |
 | Media scanner | Implemented | `internal/scanner`: In-place discovery, recursive walk, format detection, deduplication, scan lock, status API |
 | Metadata & thumbnails | Implemented | `internal/media`: EXIF `DateTimeOriginal`, orientation transforms, bilinear thumbnailing, decompression bomb checks |
-| Database integration | Implemented | `internal/database`: Pure-Go SQLite, WAL mode, foreign keys, versioned migrations |
-| Repository layer | Implemented | `internal/repository`: SQLite repositories for Photos (Create, Update, Delete, Get, List, Count) and Albums |
-| API Endpoints | Implemented | `/api/health`, `/api/photos`, `/api/photos/:id`, `/api/photos/:id/file`, `/api/photos/:id/thumbnail`, `/api/photos/scan`, `/api/photos/upload`, `/api/albums` |
+| Database integration | Implemented | `internal/database`: Pure-Go SQLite, WAL mode, foreign keys, versioned migrations (v1, v2) |
+| Repository layer | Implemented | `internal/repository`: SQLite PhotoRepository and SQLite AlbumRepository with transactional batch operations |
+| API Endpoints | Implemented | `/api/health`, `/api/photos`, `/api/photos/:id`, `/api/photos/:id/file`, `/api/photos/:id/thumbnail`, `/api/photos/scan`, `/api/photos/upload`, `/api/albums`, `/api/albums/:id`, `/api/albums/:id/photos`, `/api/albums/:id/photos/:photoId` |
 | Photo gallery UI | Implemented | Centralized `PhotosContext`, real API data, grid/list view, sorting, search filter, empty/loading/error states, Load More pagination |
 | Photo viewer (Lightbox) | Implemented | Real photo URLs and metadata, `object-contain` aspect preservation, keyboard navigation, EXIF resolution and file size display |
 | Photo upload UI | Implemented | Drag & drop, multi-file selection, progress tracking, per-file error handling, auto-refresh |
 | Media scan UI | Implemented | One-click media scan, progress polling, scan summary banner, instant gallery refresh |
 | Timeline UI | Implemented | Real photo data, chronological grouping by EXIF `DateTimeOriginal`, Phase 5 status notices |
-| Folders UI | Implemented | Real SQLite albums from `/api/albums`, persistent creation, Phase 4 status notices |
+| Folders & Albums UI | Implemented | Real SQLite albums from `/api/albums`, persistent creation, renaming, safe deletion, album detail view, photo assignment, remove photo |
 | Theme switching | Implemented | Light, dark, and system preference with localStorage persistence |
-| Automated tests | Verified | 27 Go tests passing across `api`, `config`, `database`, `media`, `repository`, `scanner`, `server`, and `storage` |
-| Frontend build | Verified | `npm run typecheck` and `npm run build` passing cleanly (0 errors) |
+| Automated tests | Verified | 29 Go tests passing across all packages; frontend typecheck and build passing cleanly (0 errors) |
 | Unified Dockerfile | Implemented | Multi-Stage build (`CGO_ENABLED=0` statically compiled, non-root UID 1000) |
 
 ## 5. Verification Results
@@ -258,11 +247,11 @@ Scope:
 ```
 ?   	pixora/backend/cmd/server	[no test files]
 === RUN   TestAlbumsAPI
---- PASS: TestAlbumsAPI (0.00s)
+--- PASS: TestAlbumsAPI (0.02s)
 === RUN   TestPhotosAPI
 --- PASS: TestPhotosAPI (0.03s)
 === RUN   TestUploadAPI
---- PASS: TestUploadAPI (0.01s)
+--- PASS: TestUploadAPI (0.03s)
 === RUN   TestScanAPI
 --- PASS: TestScanAPI (0.01s)
 === RUN   TestHealthHandler
@@ -270,7 +259,7 @@ Scope:
 === RUN   TestNewHealthHandlerWithDBAndStorage
 --- PASS: TestNewHealthHandlerWithDBAndStorage (0.00s)
 PASS
-ok  	pixora/backend/internal/api	0.066s
+ok  	pixora/backend/internal/api	0.090s
 === RUN   TestConfigDefaultsProduction
 --- PASS: TestConfigDefaultsProduction (0.00s)
 === RUN   TestConfigEnvironmentOverrides
@@ -290,44 +279,46 @@ ok  	pixora/backend/internal/config	0.002s
 === RUN   TestDatabaseForeignKeyEnforcement
 --- PASS: TestDatabaseForeignKeyEnforcement (0.00s)
 === RUN   TestDatabaseUniqueConstraints
---- PASS: TestDatabaseUniqueConstraints (0.00s)
+--- PASS: TestDatabaseUniqueConstraints (0.01s)
 === RUN   TestDatabasePingAndClose
 --- PASS: TestDatabasePingAndClose (0.00s)
 PASS
-ok  	pixora/backend/internal/database	0.011s
+ok  	pixora/backend/internal/database	0.016s
 === RUN   TestExtractMetadata
---- PASS: TestExtractMetadata (0.01s)
+--- PASS: TestExtractMetadata (0.03s)
 === RUN   TestIsSupportedExtension
 --- PASS: TestIsSupportedExtension (0.00s)
 === RUN   TestOrientationTransform
 --- PASS: TestOrientationTransform (0.00s)
 === RUN   TestThumbnailService
---- PASS: TestThumbnailService (0.09s)
+--- PASS: TestThumbnailService (0.10s)
 === RUN   TestThumbnailServiceReadOnly
 --- PASS: TestThumbnailServiceReadOnly (0.00s)
 PASS
-ok  	pixora/backend/internal/media	0.113s
+ok  	pixora/backend/internal/media	0.134s
 ?   	pixora/backend/internal/models	[no test files]
 === RUN   TestPhotoRepositoryCRUDAndListing
 --- PASS: TestPhotoRepositoryCRUDAndListing (0.00s)
 === RUN   TestAlbumRepositoryCRUDAndPhotos
---- PASS: TestAlbumRepositoryCRUDAndPhotos (0.00s)
+--- PASS: TestAlbumRepositoryCRUDAndPhotos (0.01s)
 PASS
-ok  	pixora/backend/internal/repository	0.006s
+ok  	pixora/backend/internal/repository	0.013s
 === RUN   TestScannerDiscoveryAndRepeatedScan
 --- PASS: TestScannerDiscoveryAndRepeatedScan (0.10s)
 === RUN   TestScannerSymlinkEscapePrevention
---- PASS: TestScannerSymlinkEscapePrevention (0.00s)
+--- PASS: TestScannerSymlinkEscapePrevention (0.01s)
 === RUN   TestScannerConcurrentScanProtection
 --- PASS: TestScannerConcurrentScanProtection (0.00s)
 === RUN   TestScannerMissingStorageRoot
 --- PASS: TestScannerMissingStorageRoot (0.00s)
 PASS
-ok  	pixora/backend/internal/scanner	0.102s
+ok  	pixora/backend/internal/scanner	0.118s
 === RUN   TestFrontendBackendUnifiedServing
 --- PASS: TestFrontendBackendUnifiedServing (0.00s)
 === RUN   TestPhase3FullServerLifecycle
 --- PASS: TestPhase3FullServerLifecycle (0.03s)
+=== RUN   TestPhase4FullServerLifecycle
+--- PASS: TestPhase4FullServerLifecycle (0.01s)
 === RUN   TestServerHealthRoute
 --- PASS: TestServerHealthRoute (0.00s)
 === RUN   TestServerWithDependencies
@@ -337,7 +328,7 @@ ok  	pixora/backend/internal/scanner	0.102s
 === RUN   TestServerStaticAndSPAFallback
 --- PASS: TestServerStaticAndSPAFallback (0.00s)
 PASS
-ok  	pixora/backend/internal/server	0.045s
+ok  	pixora/backend/internal/server	0.052s
 === RUN   TestStorageRelativePathValidation
 --- PASS: TestStorageRelativePathValidation (0.00s)
 === RUN   TestStoragePathTraversalRejection
@@ -351,15 +342,15 @@ ok  	pixora/backend/internal/server	0.045s
 === RUN   TestStorageFileReadWriteLifecycle
 --- PASS: TestStorageFileReadWriteLifecycle (0.00s)
 PASS
-ok  	pixora/backend/internal/storage	0.002s
+ok  	pixora/backend/internal/storage	0.003s
 
-All 27 Go tests passed (0 failures).
+All 29 Go tests passed (0 failures).
 ```
 
 ### Frontend Build & Lint Checks (`frontend`)
 ```
 > tsc --noEmit (Passed cleanly, 0 errors)
-> vite build (Built dist/index.html, dist/assets in 1.37s)
+> vite build (Built dist/index.html, dist/assets in 1.26s)
 ```
 
 ## 6. Manual Verification Steps for User
@@ -371,33 +362,38 @@ cd backend && go test -v -count=1 ./...
 # 2. Run frontend typecheck and build
 cd ../frontend && npm run typecheck && npm run build
 
-# 3. Test running server locally with custom storage and db
+# 3. Test running server locally
 cd ../backend
 STORAGE_ROOT=./storage/media DATABASE_PATH=./storage/data/pixora.db go run ./cmd/server
 
-# 4. In another terminal, trigger a media scan to index existing files
-curl -s -X POST "http://localhost:8080/api/photos/scan?sync=true" | jq .
+# 4. In another terminal, create an album via API
+curl -s -X POST http://localhost:8080/api/albums \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Summer Vacation", "description": "Trip to the coast"}' | jq .
 
-# 5. Check scan status
-curl -s http://localhost:8080/api/photos/scan | jq .
+# 5. List albums with photo count and cover thumbnail
+curl -s http://localhost:8080/api/albums | jq .
 
-# 6. List indexed photos
-curl -s "http://localhost:8080/api/photos?limit=10" | jq .
+# 6. Add photos to the album (using indexed photo IDs)
+curl -s -X POST http://localhost:8080/api/albums/<album_id>/photos \
+  -H "Content-Type: application/json" \
+  -d '{"photoIds": ["<photo_id_1>", "<photo_id_2>"]}' | jq .
 
-# 7. Upload a photo via curl
-curl -s -X POST http://localhost:8080/api/photos \
-  -F "photos=@/path/to/my_photo.jpg" | jq .
+# 7. List photos inside the album
+curl -s http://localhost:8080/api/albums/<album_id>/photos | jq .
 
-# 8. Open the web interface in a browser
+# 8. Rename the album
+curl -s -X PATCH http://localhost:8080/api/albums/<album_id> \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Coastal Summer Vacation"}' | jq .
+
+# 9. Remove a photo from the album (without deleting original)
+curl -s -X DELETE http://localhost:8080/api/albums/<album_id>/photos/<photo_id_1> | jq .
+
+# 10. Delete the album (without deleting original media files)
+curl -s -X DELETE http://localhost:8080/api/albums/<album_id> | jq .
+
+# 11. Open the web interface in a browser
 # Navigate to http://localhost:8080
-# View real photos, test upload drag & drop, and test "Scan Media".
-
-# 9. Build and test unified Docker container (as user)
-docker build -t pixora:latest .
-
-docker run --rm \
-  -p 8080:8080 \
-  -v /home/user/Pictures:/media:ro \
-  -v pixora-data:/data \
-  --name pixora-test pixora:latest
+# Open Folders tab, create albums, add indexed photos, browse album contents, and test rename & delete.
 ```

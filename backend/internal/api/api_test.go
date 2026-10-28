@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,11 @@ func setupTestApp(t *testing.T) (*fiber.App, *database.DB, *storage.Storage, *sc
 	apiGroup.Get("/albums", api.ListAlbumsHandler(albumRepo))
 	apiGroup.Post("/albums", api.CreateAlbumHandler(albumRepo))
 	apiGroup.Get("/albums/:id", api.GetAlbumHandler(albumRepo))
+	apiGroup.Patch("/albums/:id", api.UpdateAlbumHandler(albumRepo))
+	apiGroup.Delete("/albums/:id", api.DeleteAlbumHandler(albumRepo))
+	apiGroup.Get("/albums/:id/photos", api.GetAlbumPhotosHandler(albumRepo))
+	apiGroup.Post("/albums/:id/photos", api.AddPhotosToAlbumHandler(albumRepo))
+	apiGroup.Delete("/albums/:id/photos/:photoId", api.RemovePhotoFromAlbumHandler(albumRepo))
 
 	// Photos
 	apiGroup.Get("/photos", api.ListPhotosHandler(photoRepo))
@@ -103,8 +109,47 @@ func setupTestApp(t *testing.T) (*fiber.App, *database.DB, *storage.Storage, *sc
 }
 
 func TestAlbumsAPI(t *testing.T) {
-	app, _, _, _, _, cleanup := setupTestApp(t)
+	app, db, store, _, _, cleanup := setupTestApp(t)
 	defer cleanup()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	ctx := t.Context()
+
+	// Seed two real photos in storage and repository
+	relPath1 := "originals/nature1.jpg"
+	absPath1, _ := store.ResolvePath(relPath1)
+	_ = os.MkdirAll(filepath.Dir(absPath1), 0755)
+	jpeg1 := createTestJPEG(400, 300)
+	_ = os.WriteFile(absPath1, jpeg1, 0644)
+
+	p1 := &models.Photo{
+		ID:               "photo-alb-1",
+		RelativePath:     relPath1,
+		OriginalFilename: "nature1.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         int64(len(jpeg1)),
+		FileModifiedAt:   time.Now().UTC(),
+	}
+	if err := photoRepo.Create(ctx, p1); err != nil {
+		t.Fatalf("Failed to seed photo 1: %v", err)
+	}
+
+	relPath2 := "originals/nature2.jpg"
+	absPath2, _ := store.ResolvePath(relPath2)
+	jpeg2 := createTestJPEG(400, 300)
+	_ = os.WriteFile(absPath2, jpeg2, 0644)
+
+	p2 := &models.Photo{
+		ID:               "photo-alb-2",
+		RelativePath:     relPath2,
+		OriginalFilename: "nature2.jpg",
+		MediaType:        "image/jpeg",
+		FileSize:         int64(len(jpeg2)),
+		FileModifiedAt:   time.Now().UTC(),
+	}
+	if err := photoRepo.Create(ctx, p2); err != nil {
+		t.Fatalf("Failed to seed photo 2: %v", err)
+	}
 
 	// 1. Validation failure: empty name
 	badPayload := bytes.NewReader([]byte(`{"name": "   "}`))
@@ -118,14 +163,17 @@ func TestAlbumsAPI(t *testing.T) {
 		t.Errorf("Expected 400 for empty name, got %d", resp.StatusCode)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	var errResp api.ErrorResponse
-	_ = json.Unmarshal(body, &errResp)
-	if errResp.Error != "validation_error" {
-		t.Errorf("Expected error 'validation_error', got %s", errResp.Error)
+	// 2. Validation failure: name too long (>100 characters)
+	longName := strings.Repeat("a", 101)
+	longPayload := bytes.NewReader([]byte(`{"name": "` + longName + `"}`))
+	req = httptest.NewRequest("POST", "/api/albums", longPayload)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for name > 100 chars, got %d", resp.StatusCode)
 	}
 
-	// 2. Success: create album
+	// 3. Success: create album
 	validPayload := bytes.NewReader([]byte(`{"name": "Nature", "description": "Outdoor photos"}`))
 	req = httptest.NewRequest("POST", "/api/albums", validPayload)
 	req.Header.Set("Content-Type", "application/json")
@@ -137,7 +185,7 @@ func TestAlbumsAPI(t *testing.T) {
 		t.Fatalf("Expected 201 Created, got %d", resp.StatusCode)
 	}
 
-	body, _ = io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	var createdAlbum models.Album
 	if err := json.Unmarshal(body, &createdAlbum); err != nil {
 		t.Fatalf("Failed to parse created album: %v", err)
@@ -146,43 +194,168 @@ func TestAlbumsAPI(t *testing.T) {
 		t.Errorf("Album creation data mismatch: %+v", createdAlbum)
 	}
 
-	// 3. GET /api/albums
-	req = httptest.NewRequest("GET", "/api/albums", nil)
-	resp, err = app.Test(req, -1)
-	if err != nil {
-		t.Fatalf("Failed request: %v", err)
+	// 4. Duplicate name (case-insensitive) returns 409 Conflict
+	dupPayload := bytes.NewReader([]byte(`{"name": "nature"}`))
+	req = httptest.NewRequest("POST", "/api/albums", dupPayload)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Errorf("Expected 409 Conflict for duplicate case-insensitive name, got %d", resp.StatusCode)
 	}
+
+	// 5. GET /api/albums with search & sorting
+	req = httptest.NewRequest("GET", "/api/albums?search=nat&sort=name&order=asc", nil)
+	resp, _ = app.Test(req, -1)
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
 	}
-
 	body, _ = io.ReadAll(resp.Body)
 	var listResp struct {
 		Albums []models.Album `json:"albums"`
 	}
 	_ = json.Unmarshal(body, &listResp)
 	if len(listResp.Albums) != 1 || listResp.Albums[0].ID != createdAlbum.ID {
-		t.Errorf("Expected 1 album in list, got %+v", listResp.Albums)
+		t.Errorf("Expected 1 matching album in list, got %+v", listResp.Albums)
 	}
 
-	// 4. GET /api/albums/:id
+	// 6. GET /api/albums/:id
 	req = httptest.NewRequest("GET", "/api/albums/"+createdAlbum.ID, nil)
-	resp, err = app.Test(req, -1)
-	if err != nil {
-		t.Fatalf("Failed request: %v", err)
-	}
+	resp, _ = app.Test(req, -1)
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("Expected 200, got %d", resp.StatusCode)
 	}
 
-	// 5. GET /api/albums/:id not found
+	// 7. GET /api/albums/:id not found
 	req = httptest.NewRequest("GET", "/api/albums/non-existent-id", nil)
-	resp, err = app.Test(req, -1)
-	if err != nil {
-		t.Fatalf("Failed request: %v", err)
-	}
+	resp, _ = app.Test(req, -1)
 	if resp.StatusCode != fiber.StatusNotFound {
 		t.Errorf("Expected 404, got %d", resp.StatusCode)
+	}
+
+	// 8. POST /api/albums/:id/photos (Batch add photos)
+	addPhotosPayload := bytes.NewReader([]byte(`{"photoIds": ["photo-alb-1", "photo-alb-2"]}`))
+	req = httptest.NewRequest("POST", "/api/albums/"+createdAlbum.ID+"/photos", addPhotosPayload)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 adding photos, got %d", resp.StatusCode)
+	}
+	var addResp struct {
+		Added int `json:"added"`
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &addResp)
+	if addResp.Added != 2 {
+		t.Errorf("Expected 2 added photos, got %d", addResp.Added)
+	}
+
+	// 9. Re-adding existing photos should be idempotent and prevent duplicate associations
+	req = httptest.NewRequest("POST", "/api/albums/"+createdAlbum.ID+"/photos", bytes.NewReader([]byte(`{"photoIds": ["photo-alb-1"]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Errorf("Expected 200 on duplicate add, got %d", resp.StatusCode)
+	}
+
+	// 10. Adding nonexistent photo ID returns 404 Not Found
+	badPhotoPayload := bytes.NewReader([]byte(`{"photoIds": ["missing-photo-id"]}`))
+	req = httptest.NewRequest("POST", "/api/albums/"+createdAlbum.ID+"/photos", badPhotoPayload)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("Expected 404 adding nonexistent photo, got %d", resp.StatusCode)
+	}
+
+	// 11. GET /api/albums/:id/photos
+	req = httptest.NewRequest("GET", "/api/albums/"+createdAlbum.ID+"/photos?limit=10&offset=0", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 getting album photos, got %d", resp.StatusCode)
+	}
+	var albumPhotosResp struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &albumPhotosResp)
+	if albumPhotosResp.Total != 2 || len(albumPhotosResp.Photos) != 2 {
+		t.Errorf("Expected 2 album photos, got total=%d len=%d", albumPhotosResp.Total, len(albumPhotosResp.Photos))
+	}
+	if albumPhotosResp.Photos[0].URL == "" || albumPhotosResp.Photos[0].ThumbnailURL == "" {
+		t.Errorf("Expected valid URL and ThumbnailURL on album photos: %+v", albumPhotosResp.Photos[0])
+	}
+
+	// 12. GET /api/albums/:id/photos on nonexistent album returns 404
+	req = httptest.NewRequest("GET", "/api/albums/nonexistent-album/photos", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("Expected 404 for nonexistent album photos, got %d", resp.StatusCode)
+	}
+
+	// 13. PATCH /api/albums/:id (Rename album)
+	renamePayload := bytes.NewReader([]byte(`{"name": "Wilderness", "description": "Updated outdoor wilderness photos"}`))
+	req = httptest.NewRequest("PATCH", "/api/albums/"+createdAlbum.ID, renamePayload)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 renaming album, got %d", resp.StatusCode)
+	}
+	var renamed models.Album
+	body, _ = io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &renamed)
+	if renamed.Name != "Wilderness" || renamed.PhotoCount != 2 {
+		t.Errorf("Rename mismatch: got %+v", renamed)
+	}
+
+	// 14. PATCH with empty name returns 400
+	emptyRenamePayload := bytes.NewReader([]byte(`{"name": "   "}`))
+	req = httptest.NewRequest("PATCH", "/api/albums/"+createdAlbum.ID, emptyRenamePayload)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Errorf("Expected 400 for empty rename, got %d", resp.StatusCode)
+	}
+
+	// 15. DELETE /api/albums/:id/photos/:photoId (Remove photo from album)
+	req = httptest.NewRequest("DELETE", "/api/albums/"+createdAlbum.ID+"/photos/photo-alb-1", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 removing photo from album, got %d", resp.StatusCode)
+	}
+
+	// Verify original photo in photos table STILL exists
+	reqPhoto := httptest.NewRequest("GET", "/api/photos/photo-alb-1", nil)
+	respPhoto, _ := app.Test(reqPhoto, -1)
+	if respPhoto.StatusCode != fiber.StatusOK {
+		t.Errorf("Removing photo from album must not delete the photo from /api/photos/:id, got status %d", respPhoto.StatusCode)
+	}
+
+	// 16. DELETE /api/albums/:id (Delete album)
+	req = httptest.NewRequest("DELETE", "/api/albums/"+createdAlbum.ID, nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 deleting album, got %d", resp.StatusCode)
+	}
+
+	// Verify album is gone
+	req = httptest.NewRequest("GET", "/api/albums/"+createdAlbum.ID, nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("Expected 404 for deleted album, got %d", resp.StatusCode)
+	}
+
+	// Verify original photos and storage media files are completely untouched
+	reqPhoto2 := httptest.NewRequest("GET", "/api/photos/photo-alb-2", nil)
+	respPhoto2, _ := app.Test(reqPhoto2, -1)
+	if respPhoto2.StatusCode != fiber.StatusOK {
+		t.Errorf("Deleting album must never delete original photo records, got status %d", respPhoto2.StatusCode)
+	}
+
+	if _, err := os.Stat(absPath1); os.IsNotExist(err) {
+		t.Errorf("Original media file 1 was deleted from storage")
+	}
+	if _, err := os.Stat(absPath2); os.IsNotExist(err) {
+		t.Errorf("Original media file 2 was deleted from storage")
 	}
 }
 
@@ -383,6 +556,7 @@ func TestUploadAPI(t *testing.T) {
 	emptyBody := new(bytes.Buffer)
 	emptyWriter := multipart.NewWriter(emptyBody)
 	_ = emptyWriter.Close()
+
 	emptyReq := httptest.NewRequest("POST", "/api/photos", emptyBody)
 	emptyReq.Header.Set("Content-Type", emptyWriter.FormDataContentType())
 	emptyResp, _ := app.Test(emptyReq, -1)

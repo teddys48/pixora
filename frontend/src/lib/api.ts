@@ -208,12 +208,45 @@ export interface BackendAlbum {
   name: string
   description: string
   photoCount: number
+  coverPhotoId?: string
+  coverThumbnailUrl?: string
   createdAt: string
   updatedAt: string
 }
 
-export async function fetchAlbums(signal?: AbortSignal): Promise<Folder[]> {
-  const response = await fetch(`${API_BASE_URL}/albums`, {
+export function toFrontendFolder(a: BackendAlbum): Folder {
+  return {
+    id: a.id,
+    name: a.name,
+    description: a.description,
+    photoCount: a.photoCount || 0,
+    coverUrl:
+      a.coverThumbnailUrl ||
+      (a.coverPhotoId
+        ? `${API_BASE_URL}/photos/${encodeURIComponent(a.coverPhotoId)}/thumbnail`
+        : undefined),
+    createdAt: a.createdAt,
+    updatedAt: a.updatedAt,
+  }
+}
+
+export interface FetchAlbumsOptions {
+  search?: string
+  sort?: string
+  order?: string
+}
+
+export async function fetchAlbums(
+  options: FetchAlbumsOptions = {},
+  signal?: AbortSignal
+): Promise<Folder[]> {
+  const params = new URLSearchParams()
+  if (options.search) params.set('search', options.search)
+  if (options.sort) params.set('sort', options.sort)
+  if (options.order) params.set('order', options.order)
+
+  const url = `${API_BASE_URL}/albums${params.toString() ? `?${params.toString()}` : ''}`
+  const response = await fetch(url, {
     method: 'GET',
     headers: {
       Accept: 'application/json',
@@ -222,22 +255,33 @@ export async function fetchAlbums(signal?: AbortSignal): Promise<Folder[]> {
   })
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch albums: HTTP ${response.status}`)
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch albums: HTTP ${response.status}`)
   }
 
   const data: { albums: BackendAlbum[] } = await response.json()
-  return (data.albums || []).map((a) => ({
-    id: a.id,
-    name: a.name,
-    description: a.description,
-    photoCount: a.photoCount || 0,
-    coverUrl: undefined,
-    createdAt: a.createdAt,
-    updatedAt: a.updatedAt,
-  }))
+  return (data.albums || []).map(toFrontendFolder)
 }
 
-export async function createAlbum(name: string, description: string): Promise<Folder> {
+export async function fetchAlbum(id: string, signal?: AbortSignal): Promise<Folder> {
+  const response = await fetch(`${API_BASE_URL}/albums/${encodeURIComponent(id)}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch album: HTTP ${response.status}`)
+  }
+
+  const a: BackendAlbum = await response.json()
+  return toFrontendFolder(a)
+}
+
+export async function createAlbum(name: string, description = ''): Promise<Folder> {
   const response = await fetch(`${API_BASE_URL}/albums`, {
     method: 'POST',
     headers: {
@@ -253,13 +297,125 @@ export async function createAlbum(name: string, description: string): Promise<Fo
   }
 
   const a: BackendAlbum = await response.json()
+  return toFrontendFolder(a)
+}
+
+export async function updateAlbum(
+  id: string,
+  name?: string,
+  description?: string
+): Promise<Folder> {
+  const payload: { name?: string; description?: string } = {}
+  if (name !== undefined) payload.name = name
+  if (description !== undefined) payload.description = description
+
+  const response = await fetch(`${API_BASE_URL}/albums/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to update album: HTTP ${response.status}`)
+  }
+
+  const a: BackendAlbum = await response.json()
+  return toFrontendFolder(a)
+}
+
+export async function deleteAlbum(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/albums/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to delete album: HTTP ${response.status}`)
+  }
+}
+
+export interface FetchAlbumPhotosOptions {
+  limit?: number
+  offset?: number
+}
+
+export async function fetchAlbumPhotos(
+  albumId: string,
+  options: FetchAlbumPhotosOptions = {},
+  signal?: AbortSignal
+): Promise<{ photos: Photo[]; total: number; limit: number; offset: number }> {
+  const params = new URLSearchParams()
+  if (options.limit !== undefined) params.set('limit', options.limit.toString())
+  if (options.offset !== undefined) params.set('offset', options.offset.toString())
+
+  const url = `${API_BASE_URL}/albums/${encodeURIComponent(albumId)}/photos${
+    params.toString() ? `?${params.toString()}` : ''
+  }`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch album photos: HTTP ${response.status}`)
+  }
+
+  const data: PhotoListResponse = await response.json()
   return {
-    id: a.id,
-    name: a.name,
-    description: a.description,
-    photoCount: a.photoCount || 0,
-    coverUrl: undefined,
-    createdAt: a.createdAt,
-    updatedAt: a.updatedAt,
+    photos: (data.photos || []).map(toFrontendPhoto),
+    total: data.total || 0,
+    limit: data.limit || 50,
+    offset: data.offset || 0,
+  }
+}
+
+export async function addPhotosToAlbum(
+  albumId: string,
+  photoIds: string[]
+): Promise<{ added: number; message: string }> {
+  const response = await fetch(`${API_BASE_URL}/albums/${encodeURIComponent(albumId)}/photos`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({ photoIds }),
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to add photos to album: HTTP ${response.status}`)
+  }
+
+  return response.json()
+}
+
+export async function removePhotoFromAlbum(albumId: string, photoId: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/albums/${encodeURIComponent(albumId)}/photos/${encodeURIComponent(photoId)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/json',
+      },
+    }
+  )
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(
+      errorBody?.message || `Failed to remove photo from album: HTTP ${response.status}`
+    )
   }
 }

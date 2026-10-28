@@ -2,15 +2,23 @@ import React from 'react'
 import { Photo, PhotoViewMode } from '@/types/photo'
 import { FallbackImage } from '@/components/ui/FallbackImage'
 import { formatDate, formatBytes } from '@/lib/utils'
-import { Calendar, Camera, Maximize2 } from 'lucide-react'
+import { Calendar, Camera, Maximize2, X } from 'lucide-react'
 
 interface PhotoCardProps {
   photo: Photo
   onSelect: (photo: Photo) => void
   viewMode?: PhotoViewMode
+  onRemove?: (photo: Photo) => void
+  removeLabel?: string
 }
 
-export function PhotoCard({ photo, onSelect, viewMode = 'grid' }: PhotoCardProps) {
+export function PhotoCard({
+  photo,
+  onSelect,
+  viewMode = 'grid',
+  onRemove,
+  removeLabel = 'Remove',
+}: PhotoCardProps) {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
@@ -57,12 +65,27 @@ export function PhotoCard({ photo, onSelect, viewMode = 'grid' }: PhotoCardProps
           </div>
         </div>
 
-        <div className="flex items-center gap-4 text-xs text-muted-foreground shrink-0 pl-2">
+        <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0 pl-2">
           <span className="hidden md:inline font-mono">
             {photo.metadata.width} × {photo.metadata.height}
           </span>
           <span className="font-mono">{formatBytes(photo.size)}</span>
+          {onRemove && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onRemove(photo)
+              }}
+              aria-label={removeLabel}
+              title={removeLabel}
+              className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
           <button
+            type="button"
             aria-label="View photo"
             className="p-1.5 rounded-md hover:bg-muted text-muted-foreground group-hover:text-foreground"
           >
@@ -97,6 +120,24 @@ export function PhotoCard({ photo, onSelect, viewMode = 'grid' }: PhotoCardProps
             <span>View</span>
           </div>
         </div>
+
+        {/* Remove Action Button (when in album view) */}
+        {onRemove && (
+          <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onRemove(photo)
+              }}
+              title={removeLabel}
+              aria-label={removeLabel}
+              className="p-1.5 rounded-full bg-black/70 hover:bg-destructive text-white backdrop-blur-sm transition-colors shadow-sm"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Size Badge */}
         <div className="absolute bottom-2 right-2 opacity-90 group-hover:opacity-100 transition-opacity">

@@ -15,7 +15,6 @@ function AppContent() {
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null)
   const [activePhotosList, setActivePhotosList] = useState<Photo[]>([])
   const [isLightboxOpen, setIsLightboxOpen] = useState(false)
-  const [folderFilter, setFolderFilter] = useState<string | null>(null)
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
 
   const handleSelectPhoto = (photo: Photo, list: Photo[]) => {
@@ -25,12 +24,7 @@ function AppContent() {
   }
 
   const handleSelectFolder = (folder: Folder) => {
-    setFolderFilter(folder.id)
-    navigate('/')
-  }
-
-  const handleClearFolderFilter = () => {
-    setFolderFilter(null)
+    navigate(`/folders/${folder.id}`)
   }
 
   const handleUploadSuccess = () => {
@@ -52,8 +46,6 @@ function AppContent() {
             <PhotosPage
               onSelectPhoto={handleSelectPhoto}
               onUploadClick={() => setIsUploadModalOpen(true)}
-              folderFilter={folderFilter}
-              onClearFolderFilter={handleClearFolderFilter}
             />
           }
         />
@@ -63,8 +55,6 @@ function AppContent() {
             <PhotosPage
               onSelectPhoto={handleSelectPhoto}
               onUploadClick={() => setIsUploadModalOpen(true)}
-              folderFilter={folderFilter}
-              onClearFolderFilter={handleClearFolderFilter}
             />
           }
         />
@@ -74,7 +64,21 @@ function AppContent() {
         />
         <Route
           path="/folders"
-          element={<FoldersPage onSelectFolder={handleSelectFolder} />}
+          element={
+            <FoldersPage
+              onSelectFolder={handleSelectFolder}
+              onSelectPhoto={handleSelectPhoto}
+            />
+          }
+        />
+        <Route
+          path="/folders/:albumId"
+          element={
+            <FoldersPage
+              onSelectFolder={handleSelectFolder}
+              onSelectPhoto={handleSelectPhoto}
+            />
+          }
         />
         {/* Fallback to root for any other client route */}
         <Route

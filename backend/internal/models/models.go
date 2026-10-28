@@ -19,12 +19,14 @@ type Photo struct {
 
 // Album represents a virtual photo collection or album.
 type Album struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	PhotoCount  int       `json:"photoCount"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description"`
+	PhotoCount        int       `json:"photoCount"`
+	CoverPhotoID      *string   `json:"coverPhotoId,omitempty"`
+	CoverThumbnailURL *string   `json:"coverThumbnailUrl,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // PhotoAlbum represents a many-to-many join relationship between a photo and an album.

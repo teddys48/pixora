@@ -21,6 +21,7 @@ import (
 	"pixora/backend/internal/config"
 	"pixora/backend/internal/database"
 	"pixora/backend/internal/media"
+	"pixora/backend/internal/models"
 	"pixora/backend/internal/repository"
 	"pixora/backend/internal/scanner"
 	"pixora/backend/internal/server"
@@ -339,5 +340,165 @@ func TestPhase3FullServerLifecycle(t *testing.T) {
 	respRO, _ := app.Test(reqRO, -1)
 	if respRO.StatusCode != fiber.StatusForbidden {
 		t.Errorf("Expected 403 Forbidden for upload to read-only storage, got %d", respRO.StatusCode)
+	}
+}
+
+func TestPhase4FullServerLifecycle(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_phase4_lifecycle_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mediaDir := filepath.Join(tempDir, "media")
+	dbPath := filepath.Join(tempDir, "data", "pixora.db")
+	_ = os.MkdirAll(mediaDir, 0755)
+	_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
+
+	// Seed photo in storage
+	photoPath := filepath.Join(mediaDir, "nature.jpg")
+	_ = os.WriteFile(photoPath, createTestJPEG(600, 400), 0644)
+
+	cfg := &config.Config{
+		Port:         "8080",
+		Host:         "127.0.0.1",
+		Env:          "testing",
+		StorageRoot:  mediaDir,
+		DatabasePath: dbPath,
+	}
+
+	store, err := storage.New(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("Failed to init storage: %v", err)
+	}
+
+	db, err := database.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatalf("Failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	albumRepo := repository.NewSQLiteAlbumRepository(db)
+	thumbSvc := media.NewThumbnailService(store)
+	mediaScanner := scanner.New(store, photoRepo)
+
+	app := server.NewWithDependencies(server.Dependencies{
+		Config:    cfg,
+		DB:        db,
+		Storage:   store,
+		PhotoRepo: photoRepo,
+		AlbumRepo: albumRepo,
+		Thumbnail: thumbSvc,
+		Scanner:   mediaScanner,
+	})
+
+	// 1. Scan photo
+	reqScan := httptest.NewRequest("POST", "/api/photos/scan?sync=true", nil)
+	respScan, err := app.Test(reqScan, -1)
+	if err != nil || respScan.StatusCode != fiber.StatusOK {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	reqPhotos := httptest.NewRequest("GET", "/api/photos", nil)
+	respPhotos, _ := app.Test(reqPhotos, -1)
+	var photosList struct {
+		Photos []api.PhotoResponse `json:"photos"`
+	}
+	bodyP, _ := io.ReadAll(respPhotos.Body)
+	_ = json.Unmarshal(bodyP, &photosList)
+	if len(photosList.Photos) != 1 {
+		t.Fatalf("Expected 1 scanned photo, got %d", len(photosList.Photos))
+	}
+	photoID := photosList.Photos[0].ID
+
+	// 2. Create Album: POST /api/albums
+	createPayload := bytes.NewReader([]byte(`{"name": "Landscapes", "description": "Beautiful landscape photos"}`))
+	reqCreate := httptest.NewRequest("POST", "/api/albums", createPayload)
+	reqCreate.Header.Set("Content-Type", "application/json")
+	respCreate, err := app.Test(reqCreate, -1)
+	if err != nil || respCreate.StatusCode != fiber.StatusCreated {
+		t.Fatalf("Create album failed: status %d, err %v", respCreate.StatusCode, err)
+	}
+	var createdAlbum models.Album
+	bodyAlb, _ := io.ReadAll(respCreate.Body)
+	_ = json.Unmarshal(bodyAlb, &createdAlbum)
+	albumID := createdAlbum.ID
+
+	// 3. Case-insensitive duplicate name conflict: POST /api/albums with "landscapes"
+	dupPayload := bytes.NewReader([]byte(`{"name": "landscapes"}`))
+	reqDup := httptest.NewRequest("POST", "/api/albums", dupPayload)
+	reqDup.Header.Set("Content-Type", "application/json")
+	respDup, _ := app.Test(reqDup, -1)
+	if respDup.StatusCode != fiber.StatusConflict {
+		t.Errorf("Expected 409 Conflict for duplicate album name, got %d", respDup.StatusCode)
+	}
+
+	// 4. Add photo to album: POST /api/albums/:id/photos
+	addPayload := bytes.NewReader([]byte(`{"photoIds": ["` + photoID + `"]}`))
+	reqAdd := httptest.NewRequest("POST", "/api/albums/"+albumID+"/photos", addPayload)
+	reqAdd.Header.Set("Content-Type", "application/json")
+	respAdd, err := app.Test(reqAdd, -1)
+	if err != nil || respAdd.StatusCode != fiber.StatusOK {
+		t.Fatalf("Add photos to album failed: status %d, err %v", respAdd.StatusCode, err)
+	}
+
+	// 5. Verify album photoCount and cover thumbnail
+	reqGetAlbum := httptest.NewRequest("GET", "/api/albums/"+albumID, nil)
+	respGetAlbum, _ := app.Test(reqGetAlbum, -1)
+	var fetchedAlbum models.Album
+	bodyFA, _ := io.ReadAll(respGetAlbum.Body)
+	_ = json.Unmarshal(bodyFA, &fetchedAlbum)
+	if fetchedAlbum.PhotoCount != 1 {
+		t.Errorf("Expected photoCount 1, got %d", fetchedAlbum.PhotoCount)
+	}
+	if fetchedAlbum.CoverThumbnailURL == nil || *fetchedAlbum.CoverThumbnailURL == "" {
+		t.Errorf("Expected non-empty cover thumbnail URL on album with photos")
+	}
+
+	// 6. List photos in album: GET /api/albums/:id/photos
+	reqAlbPhotos := httptest.NewRequest("GET", "/api/albums/"+albumID+"/photos", nil)
+	respAlbPhotos, _ := app.Test(reqAlbPhotos, -1)
+	if respAlbPhotos.StatusCode != fiber.StatusOK {
+		t.Fatalf("Failed to get album photos: %d", respAlbPhotos.StatusCode)
+	}
+
+	// 7. Rename album: PATCH /api/albums/:id
+	renamePayload := bytes.NewReader([]byte(`{"name": "Wilderness Scenery"}`))
+	reqRename := httptest.NewRequest("PATCH", "/api/albums/"+albumID, renamePayload)
+	reqRename.Header.Set("Content-Type", "application/json")
+	respRename, _ := app.Test(reqRename, -1)
+	if respRename.StatusCode != fiber.StatusOK {
+		t.Fatalf("Rename failed: %d", respRename.StatusCode)
+	}
+
+	// 8. Remove photo from album: DELETE /api/albums/:id/photos/:photoId
+	reqRemove := httptest.NewRequest("DELETE", "/api/albums/"+albumID+"/photos/"+photoID, nil)
+	respRemove, _ := app.Test(reqRemove, -1)
+	if respRemove.StatusCode != fiber.StatusOK {
+		t.Fatalf("Remove photo from album failed: %d", respRemove.StatusCode)
+	}
+
+	// Photo MUST still exist in global library
+	reqCheckP := httptest.NewRequest("GET", "/api/photos/"+photoID, nil)
+	respCheckP, _ := app.Test(reqCheckP, -1)
+	if respCheckP.StatusCode != fiber.StatusOK {
+		t.Errorf("Removing photo from album must NOT delete photo from library, got status %d", respCheckP.StatusCode)
+	}
+
+	// 9. Delete album: DELETE /api/albums/:id
+	reqDelAlb := httptest.NewRequest("DELETE", "/api/albums/"+albumID, nil)
+	respDelAlb, _ := app.Test(reqDelAlb, -1)
+	if respDelAlb.StatusCode != fiber.StatusOK {
+		t.Fatalf("Delete album failed: %d", respDelAlb.StatusCode)
+	}
+
+	// Original photo in DB and file on disk MUST still exist
+	respCheckP2, _ := app.Test(reqCheckP, -1)
+	if respCheckP2.StatusCode != fiber.StatusOK {
+		t.Errorf("Deleting album must NOT delete photo from library, got status %d", respCheckP2.StatusCode)
+	}
+	if _, err := os.Stat(photoPath); os.IsNotExist(err) {
+		t.Errorf("Deleting album must NEVER delete files in STORAGE_ROOT")
 	}
 }
