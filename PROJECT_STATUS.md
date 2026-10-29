@@ -139,7 +139,7 @@ Scope & Acceptance Criteria Met:
   - Preserves search and filter state when returning from the Photo Viewer (Lightbox).
 - [x] **Date Transparency & Fallback Semantics (`PhotoCard.tsx`):**
   - Displays verified EXIF capture dates with standard formatting.
-  - Explicitly prefixes fallback filesystem modification dates with `Mod: <date>` and distinct styling so users are never misled.
+  - Explicitly prefixes fallback filesystem modification dates with `<date>` and distinct styling so users are never misled.
   - Tooltips clearly describe the timestamp origin (`Verified EXIF capture date` vs `Filesystem modification time (fallback, no EXIF capture date)`).
 - [x] **Empty & Error States (`EmptyState.tsx`):**
   - Distinct empty states for search queries vs active filter criteria with one-click reset action.

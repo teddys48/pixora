@@ -103,7 +103,7 @@ export function LightboxModal({
   }, [currentIndex, photos, hasMore, onLoadMore, onNavigate])
 
   const handleClose = useCallback(() => {
-    handleClose()
+    onClose()
     if (photo?.id) {
       setTimeout(() => {
         const el = document.getElementById(`photo-${photo.id}`)
@@ -221,7 +221,7 @@ export function LightboxModal({
       document.body.style.overflow = originalOverflow
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [isOpen, onClose, handlePrev, handleNext, handleZoomIn, handleZoomOut, resetZoom])
+  }, [isOpen, handleClose, handlePrev, handleNext, handleZoomIn, handleZoomOut, resetZoom])
 
   if (!isOpen || !photo) return null
 

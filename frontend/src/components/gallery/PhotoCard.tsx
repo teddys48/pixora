@@ -36,7 +36,7 @@ export function PhotoCard({
   const displayDate = isCaptureDate
     ? formatDate(photo.takenAt)
     : hasFallbackDate
-    ? `Mod: ${formatDate(photo.fileModifiedAt)}`
+    ? `${formatDate(photo.fileModifiedAt)}`
     : 'Undated'
 
   if (viewMode === 'list') {

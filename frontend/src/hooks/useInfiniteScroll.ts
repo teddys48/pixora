@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 
 export interface UseInfiniteScrollOptions {
   onLoadMore: () => void | Promise<void>
@@ -14,10 +14,11 @@ export interface UseInfiniteScrollOptions {
  * and invokes `onLoadMore` when approaching the end of the loaded content.
  *
  * Built-in safeguards:
+ * - Properly manages sentinel DOM element attachment via state
  * - Prevents rapid re-triggers when loading is already in progress
- * - Ignores intersection when `hasMore` is false
- * - Re-evaluates viewport visibility on sentinel attachment
- * - Automatically cleans up observer on unmount
+ * - Ignores intersection when `hasMore` is false or `disabled` is true
+ * - Re-evaluates viewport visibility on initial sentinel attachment and after loading finishes
+ * - Automatically cleans up observer on unmount or sentinel change
  */
 export function useInfiniteScroll({
   onLoadMore,
@@ -27,7 +28,8 @@ export function useInfiniteScroll({
   rootMargin = '400px 0px',
   disabled = false,
 }: UseInfiniteScrollOptions) {
-  const sentinelNodeRef = useRef<HTMLDivElement | null>(null)
+  const [sentinelNode, setSentinelNode] = useState<HTMLDivElement | null>(null)
+
   const onLoadMoreRef = useRef(onLoadMore)
   onLoadMoreRef.current = onLoadMore
 
@@ -63,9 +65,9 @@ export function useInfiniteScroll({
     }
   }, [])
 
+  // Manage IntersectionObserver attachment to sentinel node
   useEffect(() => {
-    const target = sentinelNodeRef.current
-    if (!target) return
+    if (!sentinelNode || !hasMore || disabled) return
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -80,25 +82,30 @@ export function useInfiniteScroll({
       }
     )
 
-    observer.observe(target)
+    observer.observe(sentinelNode)
 
     return () => {
       observer.disconnect()
     }
-  }, [triggerLoadMore, rootMargin, threshold])
+  }, [sentinelNode, hasMore, disabled, triggerLoadMore, rootMargin, threshold])
 
-  const sentinelRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      sentinelNodeRef.current = node
-      if (node && hasMoreRef.current && !isLoadingRef.current && !disabledRef.current) {
-        const rect = node.getBoundingClientRect()
-        if (rect.top <= window.innerHeight + 400) {
-          triggerLoadMore()
-        }
-      }
-    },
-    [triggerLoadMore]
-  )
+  // Re-check viewport visibility when loading finishes, hasMore changes, or sentinel attaches
+  // In case the sentinel is already in or near the viewport (e.g., initial render or large displays)
+  useEffect(() => {
+    if (!sentinelNode || !hasMore || isLoading || disabled) return
+
+    const rect = sentinelNode.getBoundingClientRect()
+    const marginMatch = rootMargin.match(/^(-?\d+)px/)
+    const marginOffset = marginMatch ? parseInt(marginMatch[1], 10) : 400
+
+    if (rect.top <= window.innerHeight + marginOffset && rect.bottom >= -marginOffset) {
+      triggerLoadMore()
+    }
+  }, [sentinelNode, hasMore, isLoading, disabled, rootMargin, triggerLoadMore])
+
+  const sentinelRef = useCallback((node: HTMLDivElement | null) => {
+    setSentinelNode(node)
+  }, [])
 
   return { sentinelRef }
 }

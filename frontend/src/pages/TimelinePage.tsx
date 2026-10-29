@@ -126,6 +126,7 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
     onLoadMore: handleLoadMore,
     hasMore,
     isLoading: isLoadingMore,
+    disabled: Boolean(loadMoreError),
   })
 
   // Group photos into Month Sections containing Day Groups, plus a separate Undated Group

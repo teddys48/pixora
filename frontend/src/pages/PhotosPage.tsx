@@ -65,6 +65,7 @@ export function PhotosPage({
     onLoadMore: loadMore,
     hasMore,
     isLoading: isLoadingMore,
+    disabled: Boolean(loadMoreError),
   })
 
   // 1. Initial mount: read URL search parameters into state
