@@ -5,9 +5,12 @@ import { fetchPhotos, triggerScan, fetchScanStatus } from '@/lib/api'
 interface PhotosContextType {
   photos: Photo[]
   totalPhotos: number
+  nextCursor: string | null
+  hasMore: boolean
   isLoading: boolean
   isLoadingMore: boolean
   error: string | null
+  loadMoreError: string | null
   sortOption: PhotoSortOption
   setSortOption: (option: PhotoSortOption) => void
   viewMode: PhotoViewMode
@@ -44,9 +47,12 @@ const PhotosContext = createContext<PhotosContextType | undefined>(undefined)
 export function PhotosProvider({ children }: { children: React.ReactNode }) {
   const [photos, setPhotos] = useState<Photo[]>([])
   const [totalPhotos, setTotalPhotos] = useState(0)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [hasMore, setHasMore] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
 
   // Search and discovery filter states
   const [searchQuery, setSearchQuery] = useState('')
@@ -141,6 +147,7 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
         setIsLoading(true)
         setError(null)
       }
+      setLoadMoreError(null)
 
       try {
         const [sortBy, order] = mapSortOption(sortOption)
@@ -148,7 +155,6 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
         const result = await fetchPhotos(
           {
             limit: 50,
-            offset: 0,
             sort: sortBy,
             order: order,
             q: debouncedSearchQuery.trim() || undefined,
@@ -164,6 +170,8 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
 
         setPhotos(result.photos)
         setTotalPhotos(result.total)
+        setNextCursor(result.nextCursor ?? null)
+        setHasMore(Boolean(result.hasMore))
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === 'AbortError') {
           return // Request was intentionally cancelled
@@ -194,15 +202,16 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
   }, [loadPhotos])
 
   const loadMore = useCallback(async () => {
-    if (isLoadingMore || photos.length >= totalPhotos) return
+    if (isLoadingMore || !hasMore || !nextCursor) return
     setIsLoadingMore(true)
+    setLoadMoreError(null)
 
     try {
       const [sortBy, order] = mapSortOption(sortOption)
 
       const result = await fetchPhotos({
         limit: 50,
-        offset: photos.length,
+        cursor: nextCursor,
         sort: sortBy,
         order: order,
         q: debouncedSearchQuery.trim() || undefined,
@@ -214,18 +223,24 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
         isUndated: undatedOnly ? true : undefined,
       })
 
-      setPhotos((prev) => [...prev, ...result.photos])
+      setPhotos((prev) => {
+        const existing = new Set(prev.map((p) => p.id))
+        const unique = result.photos.filter((p) => !existing.has(p.id))
+        return [...prev, ...unique]
+      })
       setTotalPhotos(result.total)
+      setNextCursor(result.nextCursor ?? null)
+      setHasMore(Boolean(result.hasMore))
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load more photos'
-      setError(msg)
+      setLoadMoreError(msg)
     } finally {
       setIsLoadingMore(false)
     }
   }, [
     isLoadingMore,
-    photos.length,
-    totalPhotos,
+    hasMore,
+    nextCursor,
     sortOption,
     debouncedSearchQuery,
     startDate,
@@ -242,48 +257,43 @@ export function PhotosProvider({ children }: { children: React.ReactNode }) {
   }, [loadPhotos])
 
   const handleScan = useCallback(async () => {
-    if (isScanning) return
     setIsScanning(true)
-    setScanResult(null)
-
     try {
       const initial = await triggerScan(false)
-      if (initial.status === 'completed' || initial.status === 'failed') {
-        setScanResult(initial)
-        setIsScanning(false)
-        await loadPhotos(false)
-        return
-      }
+      setScanResult(initial)
 
-      const pollInterval = window.setInterval(async () => {
+      const checkInterval = setInterval(async () => {
         try {
-          const current = await fetchScanStatus()
-          if (current.status === 'completed' || current.status === 'failed') {
-            window.clearInterval(pollInterval)
-            setScanResult(current)
+          const status = await fetchScanStatus()
+          setScanResult(status)
+          if (status.status !== 'running') {
+            clearInterval(checkInterval)
             setIsScanning(false)
-            await loadPhotos(false)
+            await refreshPhotos()
           }
         } catch {
-          window.clearInterval(pollInterval)
+          clearInterval(checkInterval)
           setIsScanning(false)
         }
-      }, 1200)
+      }, 1000)
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to initiate scan'
-      setError(msg)
       setIsScanning(false)
+      const msg = err instanceof Error ? err.message : 'Failed to start media library scan'
+      setError(msg)
     }
-  }, [isScanning, loadPhotos])
+  }, [refreshPhotos])
 
   return (
     <PhotosContext.Provider
       value={{
         photos,
         totalPhotos,
+        nextCursor,
+        hasMore,
         isLoading,
         isLoadingMore,
         error,
+        loadMoreError,
         sortOption,
         setSortOption,
         viewMode,

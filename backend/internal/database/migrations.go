@@ -74,6 +74,13 @@ CREATE INDEX IF NOT EXISTS idx_photos_file_modified_at ON photos(file_modified_a
 CREATE INDEX IF NOT EXISTS idx_photos_file_size ON photos(file_size);
 `,
 	},
+	{
+		Version: 4,
+		Name:    "add_album_cursor_index",
+		SQL: `
+CREATE INDEX IF NOT EXISTS idx_photo_albums_album_added ON photo_albums(album_id, added_at DESC);
+`,
+	},
 }
 
 // Migrate applies all unapplied database migrations in transactional batches.

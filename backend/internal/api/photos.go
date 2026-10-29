@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,7 +69,7 @@ type PhotoResponse struct {
 // TimelineGroupResponse groups photos by day or an undated fallback group.
 type TimelineGroupResponse struct {
 	Date      string          `json:"date"`  // "2026-10-24" or "undated"
-	Label     string          `json:"label"` // "October 24, 2026" or "Undated Photos"
+	Label     string          `json:"label"` // "Monday, October 24, 2026" or "Undated Photos"
 	Year      int             `json:"year,omitempty"`
 	Month     string          `json:"month,omitempty"`
 	Day       int             `json:"day,omitempty"`
@@ -80,32 +80,46 @@ type TimelineGroupResponse struct {
 // TimelineResponse represents the response for GET /api/timeline.
 type TimelineResponse struct {
 	Photos     []PhotoResponse         `json:"photos"`
+	Items      []PhotoResponse         `json:"items"`
 	Groups     []TimelineGroupResponse `json:"groups"`
 	Total      int                     `json:"total"`
 	Limit      int                     `json:"limit"`
 	Offset     int                     `json:"offset"`
-	NextCursor string                  `json:"nextCursor,omitempty"`
+	NextCursor string                  `json:"nextCursor"`
 	HasMore    bool                    `json:"hasMore"`
 }
 
-func encodeCursor(offset int) string {
-	return base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("offset:%d", offset)))
+func (r TimelineResponse) MarshalJSON() ([]byte, error) {
+	type Alias TimelineResponse
+	aux := struct {
+		Alias
+		NextCursor *string `json:"nextCursor"`
+	}{
+		Alias: Alias(r),
+	}
+	if r.NextCursor != "" {
+		aux.NextCursor = &r.NextCursor
+	}
+	return json.Marshal(aux)
 }
 
-func decodeCursor(cursor string) (int, error) {
-	data, err := base64.URLEncoding.DecodeString(cursor)
-	if err != nil {
-		return 0, fmt.Errorf("invalid base64 cursor: %w", err)
+func (r *TimelineResponse) UnmarshalJSON(data []byte) error {
+	type Alias TimelineResponse
+	aux := struct {
+		*Alias
+		NextCursor *string `json:"nextCursor"`
+	}{
+		Alias: (*Alias)(r),
 	}
-	parts := strings.SplitN(string(data), ":", 2)
-	if len(parts) != 2 || parts[0] != "offset" {
-		return 0, errors.New("invalid cursor format")
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
 	}
-	offset, err := strconv.Atoi(parts[1])
-	if err != nil || offset < 0 {
-		return 0, errors.New("invalid cursor offset")
+	if aux.NextCursor != nil {
+		r.NextCursor = *aux.NextCursor
+	} else {
+		r.NextCursor = ""
 	}
-	return offset, nil
+	return nil
 }
 
 // parseFilterDate parses date query parameters safely into UTC time.
@@ -286,7 +300,7 @@ func ToPhotoResponse(p models.Photo) PhotoResponse {
 	}
 }
 
-// ListPhotosHandler handles GET /api/photos with search, filters, pagination, and sorting.
+// ListPhotosHandler handles GET /api/photos with search, filters, cursor pagination, and sorting.
 func ListPhotosHandler(repo repository.PhotoRepository) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil {
@@ -298,7 +312,17 @@ func ListPhotosHandler(repo repository.PhotoRepository) fiber.Handler {
 			return SendError(c, fiber.StatusBadRequest, "validation_error", err.Error())
 		}
 
-		photos, total, err := repo.SearchAndFilter(c.Context(), filter)
+		scope := ComputePhotoScope(filter)
+
+		if cursorStr := c.Query("cursor"); cursorStr != "" {
+			cData, err := DecodeCursor(cursorStr, scope)
+			if err != nil {
+				return SendError(c, fiber.StatusBadRequest, "validation_error", fmt.Sprintf("invalid cursor: %v", err))
+			}
+			filter.Cursor = cData
+		}
+
+		photos, total, hasMore, nextCursorData, err := repo.SearchAndFilterCursor(c.Context(), filter)
 		if err != nil {
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list photos")
 		}
@@ -308,16 +332,27 @@ func ListPhotosHandler(repo repository.PhotoRepository) fiber.Handler {
 			responseList[i] = ToPhotoResponse(p)
 		}
 
+		var nextCursor *string
+		if hasMore && nextCursorData != nil {
+			token, err := EncodeCursor(nextCursorData, scope)
+			if err == nil {
+				nextCursor = &token
+			}
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"photos": responseList,
-			"total":  total,
-			"limit":  filter.Limit,
-			"offset": filter.Offset,
+			"photos":     responseList,
+			"items":      responseList,
+			"total":      total,
+			"limit":      filter.Limit,
+			"offset":     filter.Offset,
+			"nextCursor": nextCursor,
+			"hasMore":    hasMore,
 		})
 	}
 }
 
-// TimelineHandler handles GET /api/timeline with chronological ordering, day grouping, undated handling, and optional discovery filters.
+// TimelineHandler handles GET /api/timeline with chronological ordering, day grouping, undated handling, and cursor pagination.
 func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil {
@@ -342,23 +377,23 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 		}
 		filter.Limit = limit
 
-		offset := 0
+		scope := ComputeTimelineScope(filter)
+
 		if cursorStr := c.Query("cursor"); cursorStr != "" {
-			parsedOffset, err := decodeCursor(cursorStr)
+			cData, err := DecodeCursor(cursorStr, scope)
 			if err != nil {
 				return SendError(c, fiber.StatusBadRequest, "validation_error", fmt.Sprintf("invalid cursor: %v", err))
 			}
-			offset = parsedOffset
+			filter.Cursor = cData
 		} else if o := c.Query("offset"); o != "" {
 			parsed, err := strconv.Atoi(o)
 			if err != nil || parsed < 0 {
 				return SendError(c, fiber.StatusBadRequest, "validation_error", "offset must be a non-negative integer")
 			}
-			offset = parsed
+			filter.Offset = parsed
 		}
-		filter.Offset = offset
 
-		photos, total, err := repo.ListTimelineWithFilter(c.Context(), filter)
+		photos, total, hasMore, nextCursorData, err := repo.ListTimelineCursor(c.Context(), filter)
 		if err != nil {
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list timeline photos")
 		}
@@ -408,18 +443,21 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 			}
 		}
 
-		hasMore := (offset + len(photos)) < total
 		var nextCursor string
-		if hasMore {
-			nextCursor = encodeCursor(offset + len(photos))
+		if hasMore && nextCursorData != nil {
+			token, err := EncodeCursor(nextCursorData, scope)
+			if err == nil {
+				nextCursor = token
+			}
 		}
 
 		return c.Status(fiber.StatusOK).JSON(TimelineResponse{
 			Photos:     responseList,
+			Items:      responseList,
 			Groups:     groups,
 			Total:      total,
 			Limit:      limit,
-			Offset:     offset,
+			Offset:     filter.Offset,
 			NextCursor: nextCursor,
 			HasMore:    hasMore,
 		})

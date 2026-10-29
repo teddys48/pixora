@@ -65,9 +65,12 @@ export interface PhotoResponse {
 
 export interface PhotoListResponse {
   photos: PhotoResponse[]
+  items?: PhotoResponse[]
   total: number
   limit: number
   offset: number
+  nextCursor?: string | null
+  hasMore?: boolean
 }
 
 export interface TimelineGroupResponse {
@@ -82,11 +85,12 @@ export interface TimelineGroupResponse {
 
 export interface TimelineResponse {
   photos: PhotoResponse[]
+  items?: PhotoResponse[]
   groups: TimelineGroupResponse[]
   total: number
   limit: number
   offset: number
-  nextCursor?: string
+  nextCursor?: string | null
   hasMore: boolean
 }
 
@@ -139,4 +143,5 @@ export interface PhotoFilterOptions {
   order?: string
   limit?: number
   offset?: number
+  cursor?: string
 }

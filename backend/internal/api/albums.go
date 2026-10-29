@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,7 +247,7 @@ func DeleteAlbumHandler(repo repository.AlbumRepository) fiber.Handler {
 	}
 }
 
-// GetAlbumPhotosHandler handles GET /api/albums/:id/photos with pagination.
+// GetAlbumPhotosHandler handles GET /api/albums/:id/photos with cursor-based pagination.
 func GetAlbumPhotosHandler(repo repository.AlbumRepository) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil {
@@ -279,7 +280,29 @@ func GetAlbumPhotosHandler(repo repository.AlbumRepository) fiber.Handler {
 			offset = parsed
 		}
 
-		photos, total, err := repo.GetPhotos(c.Context(), id, offset, limit)
+		scope := ComputeAlbumScope(id)
+		var cursor *repository.CursorData
+		if cursorStr := c.Query("cursor"); cursorStr != "" {
+			cData, err := DecodeCursor(cursorStr, scope)
+			if err != nil {
+				return SendError(c, fiber.StatusBadRequest, "validation_error", fmt.Sprintf("invalid cursor: %v", err))
+			}
+			cursor = cData
+		}
+
+		var photos []models.Photo
+		var total int
+		var hasMore bool
+		var nextCursorData *repository.CursorData
+		var err error
+
+		if cursor != nil || (c.Query("offset") == "" && c.Query("cursor") == "") {
+			photos, total, hasMore, nextCursorData, err = repo.GetPhotosCursor(c.Context(), id, limit, cursor)
+		} else {
+			photos, total, err = repo.GetPhotos(c.Context(), id, offset, limit)
+			hasMore = (offset + len(photos)) < total
+		}
+
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return SendError(c, fiber.StatusNotFound, "not_found", "album not found")
@@ -292,11 +315,22 @@ func GetAlbumPhotosHandler(repo repository.AlbumRepository) fiber.Handler {
 			responses = append(responses, ToPhotoResponse(p))
 		}
 
+		var nextCursor *string
+		if hasMore && nextCursorData != nil {
+			token, err := EncodeCursor(nextCursorData, scope)
+			if err == nil {
+				nextCursor = &token
+			}
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"photos": responses,
-			"total":  total,
-			"limit":  limit,
-			"offset": offset,
+			"photos":     responses,
+			"items":      responses,
+			"total":      total,
+			"limit":      limit,
+			"offset":     offset,
+			"nextCursor": nextCursor,
+			"hasMore":    hasMore,
 		})
 	}
 }

@@ -11,15 +11,19 @@ import { PhotosProvider, usePhotos } from '@/context/PhotosContext'
 
 function AppContent() {
   const navigate = useNavigate()
-  const { refreshPhotos } = usePhotos()
+  const { refreshPhotos, photos, hasMore, loadMore, isLoadingMore } = usePhotos()
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null)
   const [activePhotosList, setActivePhotosList] = useState<Photo[]>([])
+  const [activeCollectionIsContext, setActiveCollectionIsContext] = useState(false)
   const [isLightboxOpen, setIsLightboxOpen] = useState(false)
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
 
   const handleSelectPhoto = (photo: Photo, list: Photo[]) => {
     setSelectedPhoto(photo)
     setActivePhotosList(list)
+    // If selected from main gallery photos list, link directly to context for infinite scrolling in viewer
+    const isMain = list === photos || window.location.pathname === "/" || window.location.pathname === "/photos"
+    setActiveCollectionIsContext(isMain)
     setIsLightboxOpen(true)
   }
 
@@ -96,9 +100,12 @@ function AppContent() {
       <LightboxModal
         isOpen={isLightboxOpen}
         photo={selectedPhoto}
-        photos={activePhotosList}
+        photos={activeCollectionIsContext ? photos : activePhotosList}
         onClose={() => setIsLightboxOpen(false)}
         onNavigate={(nextPhoto) => setSelectedPhoto(nextPhoto)}
+        hasMore={activeCollectionIsContext ? hasMore : false}
+        onLoadMore={activeCollectionIsContext ? loadMore : undefined}
+        isLoadingMore={activeCollectionIsContext ? isLoadingMore : false}
       />
     </AppLayout>
   )

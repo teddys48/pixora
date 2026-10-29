@@ -23,6 +23,7 @@ type AlbumRepository interface {
 	AddPhotos(ctx context.Context, albumID string, photoIDs []string) (int, error)
 	RemovePhoto(ctx context.Context, photoID, albumID string) error
 	GetPhotos(ctx context.Context, albumID string, offset, limit int) ([]models.Photo, int, error)
+	GetPhotosCursor(ctx context.Context, albumID string, limit int, cursor *CursorData) (photos []models.Photo, total int, hasMore bool, nextCursor *CursorData, err error)
 }
 
 // SQLiteAlbumRepository implements AlbumRepository using SQLite.
@@ -152,13 +153,14 @@ func (r *SQLiteAlbumRepository) Update(ctx context.Context, a *models.Album) err
 	return nil
 }
 
-// Delete removes an album record. Associated photo_album mappings are removed via ON DELETE CASCADE.
-// Photos and filesystem files are never deleted.
+// Delete removes an album by ID. Photo associations in photo_albums cascade-delete automatically.
 func (r *SQLiteAlbumRepository) Delete(ctx context.Context, id string) error {
-	res, err := r.db.ExecContext(ctx, "DELETE FROM albums WHERE id = ?", id)
+	query := `DELETE FROM albums WHERE id = ?`
+	res, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete album: %w", err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to check rows affected: %w", err)
@@ -166,6 +168,7 @@ func (r *SQLiteAlbumRepository) Delete(ctx context.Context, id string) error {
 	if affected == 0 {
 		return ErrNotFound
 	}
+
 	return nil
 }
 
@@ -180,16 +183,10 @@ func (r *SQLiteAlbumRepository) AddPhoto(ctx context.Context, photoID, albumID s
 	}()
 
 	now := time.Now().UTC()
-	query := `INSERT INTO photo_albums (photo_id, album_id, added_at) VALUES (?, ?, ?)`
+	query := `INSERT OR IGNORE INTO photo_albums (photo_id, album_id, added_at) VALUES (?, ?, ?)`
 	_, err = tx.ExecContext(ctx, query, photoID, albumID, now)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY KEY") {
-			return fmt.Errorf("%w: photo already in album", ErrConflict)
-		}
-		if strings.Contains(err.Error(), "FOREIGN KEY") || strings.Contains(err.Error(), "foreign key") {
-			return fmt.Errorf("%w: photo or album does not exist", ErrNotFound)
-		}
-		return fmt.Errorf("failed to add photo to album: %w", err)
+		return fmt.Errorf("failed to associate photo with album: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, "UPDATE albums SET updated_at = ? WHERE id = ?", now, albumID)
@@ -308,7 +305,7 @@ func (r *SQLiteAlbumRepository) RemovePhoto(ctx context.Context, photoID, albumI
 	return tx.Commit()
 }
 
-// GetPhotos returns paginated photos that belong to an album.
+// GetPhotos returns paginated photos that belong to an album using offset.
 func (r *SQLiteAlbumRepository) GetPhotos(ctx context.Context, albumID string, offset, limit int) ([]models.Photo, int, error) {
 	if limit <= 0 {
 		limit = 50
@@ -363,4 +360,93 @@ LIMIT ? OFFSET ?`
 	}
 
 	return photos, total, nil
+}
+
+// GetPhotosCursor returns paginated photos that belong to an album using keyset cursor pagination without using SQL OFFSET.
+func (r *SQLiteAlbumRepository) GetPhotosCursor(ctx context.Context, albumID string, limit int, cursor *CursorData) ([]models.Photo, int, bool, *CursorData, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	// Verify album exists
+	var dummy string
+	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, 0, false, nil, ErrNotFound
+		}
+		return nil, 0, false, nil, fmt.Errorf("failed to verify album: %w", err)
+	}
+
+	var total int
+	countQuery := `SELECT COUNT(*) FROM photo_albums WHERE album_id = ?`
+	if err := r.db.QueryRowContext(ctx, countQuery, albumID).Scan(&total); err != nil {
+		return nil, 0, false, nil, fmt.Errorf("failed to count album photos: %w", err)
+	}
+
+	whereClause := "pa.album_id = ?"
+	args := []interface{}{albumID}
+
+	if cursor != nil && cursor.ID != "" && cursor.TimeVal != nil {
+		whereClause += " AND (pa.added_at < ? OR (pa.added_at = ? AND p.id > ?))"
+		t := cursor.TimeVal.UTC()
+		args = append(args, t, t, cursor.ID)
+	}
+
+	query := fmt.Sprintf(`
+SELECT p.id, p.relative_path, p.original_filename, p.media_type, p.file_size,
+       p.width, p.height, p.taken_at, p.file_modified_at, p.created_at, p.updated_at,
+       pa.added_at
+FROM photos p
+INNER JOIN photo_albums pa ON pa.photo_id = p.id
+WHERE %s
+ORDER BY pa.added_at DESC, p.id ASC
+LIMIT ?`, whereClause)
+
+	args = append(args, limit+1)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, false, nil, fmt.Errorf("failed to query album photos: %w", err)
+	}
+	defer rows.Close()
+
+	photos := make([]models.Photo, 0, limit+1)
+	addedAts := make([]time.Time, 0, limit+1)
+	for rows.Next() {
+		var p models.Photo
+		var addedAt time.Time
+		if err := rows.Scan(
+			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
+			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+			&addedAt,
+		); err != nil {
+			return nil, 0, false, nil, fmt.Errorf("failed to scan album photo: %w", err)
+		}
+		photos = append(photos, p)
+		addedAts = append(addedAts, addedAt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, false, nil, fmt.Errorf("error during album photos iteration: %w", err)
+	}
+
+	hasMore := len(photos) > limit
+	if hasMore {
+		photos = photos[:limit]
+		addedAts = addedAts[:limit]
+	}
+
+	var nextCursor *CursorData
+	if hasMore && len(photos) > 0 {
+		lastPhoto := photos[len(photos)-1]
+		t := addedAts[len(addedAts)-1].UTC()
+		nextCursor = &CursorData{
+			ID:      lastPhoto.ID,
+			TimeVal: &t,
+		}
+	}
+
+	return photos, total, hasMore, nextCursor, nil
 }

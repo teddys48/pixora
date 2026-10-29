@@ -65,6 +65,7 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
 export interface FetchPhotosOptions {
   limit?: number
   offset?: number
+  cursor?: string
   sort?: string
   order?: string
   q?: string
@@ -80,10 +81,19 @@ export interface FetchPhotosOptions {
 export async function fetchPhotos(
   options: FetchPhotosOptions = {},
   signal?: AbortSignal
-): Promise<{ photos: Photo[]; total: number; limit: number; offset: number }> {
+): Promise<{
+  photos: Photo[]
+  items: Photo[]
+  total: number
+  limit: number
+  offset: number
+  nextCursor?: string | null
+  hasMore?: boolean
+}> {
   const params = new URLSearchParams()
   if (options.limit !== undefined) params.set('limit', options.limit.toString())
   if (options.offset !== undefined) params.set('offset', options.offset.toString())
+  if (options.cursor) params.set('cursor', options.cursor)
   if (options.sort) params.set('sort', options.sort)
   if (options.order) params.set('order', options.order)
   if (options.q) params.set('q', options.q)
@@ -110,11 +120,15 @@ export async function fetchPhotos(
   }
 
   const data: PhotoListResponse = await response.json()
+  const photos = (data.photos || []).map(toFrontendPhoto)
   return {
-    photos: (data.photos || []).map(toFrontendPhoto),
+    photos,
+    items: photos,
     total: data.total || 0,
     limit: data.limit || 50,
     offset: data.offset || 0,
+    nextCursor: data.nextCursor ?? null,
+    hasMore: data.hasMore,
   }
 }
 
@@ -145,7 +159,7 @@ export interface TimelineData {
   total: number
   limit: number
   offset: number
-  nextCursor?: string
+  nextCursor?: string | null
   hasMore: boolean
 }
 
@@ -189,7 +203,7 @@ export async function fetchTimeline(
     total: data.total || 0,
     limit: data.limit || 50,
     offset: data.offset || 0,
-    nextCursor: data.nextCursor,
+    nextCursor: data.nextCursor ?? null,
     hasMore: Boolean(data.hasMore),
   }
 }
@@ -468,24 +482,34 @@ export async function deleteAlbum(id: string): Promise<void> {
 export interface FetchAlbumPhotosOptions {
   limit?: number
   offset?: number
+  cursor?: string
 }
 
 export async function fetchAlbumPhotos(
   albumId: string,
   options: FetchAlbumPhotosOptions = {},
   signal?: AbortSignal
-): Promise<{ photos: Photo[]; total: number; limit: number; offset: number }> {
+): Promise<{
+  photos: Photo[]
+  items: Photo[]
+  total: number
+  limit: number
+  offset: number
+  nextCursor?: string | null
+  hasMore?: boolean
+}> {
   const params = new URLSearchParams()
-  if (options.limit !== undefined) params.set('limit', options.limit.toString())
-  if (options.offset !== undefined) params.set('offset', options.offset.toString())
+  if (options.limit !== undefined) params.set("limit", options.limit.toString())
+  if (options.offset !== undefined) params.set("offset", options.offset.toString())
+  if (options.cursor) params.set("cursor", options.cursor)
 
   const url = `${API_BASE_URL}/albums/${encodeURIComponent(albumId)}/photos${
-    params.toString() ? `?${params.toString()}` : ''
+    params.toString() ? `?${params.toString()}` : ""
   }`
   const response = await fetch(url, {
-    method: 'GET',
+    method: "GET",
     headers: {
-      Accept: 'application/json',
+      Accept: "application/json",
     },
     signal,
   })
@@ -496,11 +520,15 @@ export async function fetchAlbumPhotos(
   }
 
   const data: PhotoListResponse = await response.json()
+  const photos = (data.photos || []).map(toFrontendPhoto)
   return {
-    photos: (data.photos || []).map(toFrontendPhoto),
+    photos,
+    items: photos,
     total: data.total || 0,
     limit: data.limit || 50,
     offset: data.offset || 0,
+    nextCursor: data.nextCursor ?? null,
+    hasMore: data.hasMore,
   }
 }
 
@@ -589,6 +617,7 @@ export async function fetchPhysicalFolders(
 export interface FetchFolderContentsOptions {
   limit?: number
   offset?: number
+  cursor?: string
   sort?: string
   order?: string
 }
@@ -602,6 +631,7 @@ export async function fetchFolderContents(
   if (path !== undefined) params.set('path', path)
   if (options.limit !== undefined) params.set('limit', options.limit.toString())
   if (options.offset !== undefined) params.set('offset', options.offset.toString())
+  if (options.cursor) params.set('cursor', options.cursor)
   if (options.sort) params.set('sort', options.sort)
   if (options.order) params.set('order', options.order)
 
@@ -625,12 +655,16 @@ export async function fetchFolderContents(
     folders: Array.isArray(data.folders) ? data.folders : [],
     breadcrumbs: Array.isArray(data.breadcrumbs) ? data.breadcrumbs : [],
     photos: (Array.isArray(data.photos) ? data.photos : []).map(toFrontendPhoto),
+    items: (Array.isArray(data.photos) ? data.photos : []).map(toFrontendPhoto),
+    nextCursor: data.nextCursor ?? null,
+    hasMore: data.hasMore,
   }
 }
 
 export interface FetchFolderPhotosOptions {
   limit?: number
   offset?: number
+  cursor?: string
   sort?: string
   order?: string
 }
@@ -639,19 +673,29 @@ export async function fetchFolderPhotos(
   path: string,
   options: FetchFolderPhotosOptions = {},
   signal?: AbortSignal
-): Promise<{ path: string; photos: Photo[]; total: number; limit: number; offset: number }> {
+): Promise<{
+  path: string
+  photos: Photo[]
+  items: Photo[]
+  total: number
+  limit: number
+  offset: number
+  nextCursor?: string | null
+  hasMore?: boolean
+}> {
   const params = new URLSearchParams()
-  params.set('path', path)
-  if (options.limit !== undefined) params.set('limit', options.limit.toString())
-  if (options.offset !== undefined) params.set('offset', options.offset.toString())
-  if (options.sort) params.set('sort', options.sort)
-  if (options.order) params.set('order', options.order)
+  params.set("path", path)
+  if (options.limit !== undefined) params.set("limit", options.limit.toString())
+  if (options.offset !== undefined) params.set("offset", options.offset.toString())
+  if (options.cursor) params.set("cursor", options.cursor)
+  if (options.sort) params.set("sort", options.sort)
+  if (options.order) params.set("order", options.order)
 
   const url = `${API_BASE_URL}/folders/photos?${params.toString()}`
   const response = await fetch(url, {
-    method: 'GET',
+    method: "GET",
     headers: {
-      Accept: 'application/json',
+      Accept: "application/json",
     },
     signal,
   })
@@ -666,8 +710,11 @@ export async function fetchFolderPhotos(
   return {
     path: data.path || path,
     photos: photos,
-    total: typeof data.total === 'number' ? data.total : photos.length,
+    items: photos,
+    total: typeof data.total === "number" ? data.total : photos.length,
     limit: data.limit || 50,
     offset: data.offset || 0,
+    nextCursor: data.nextCursor ?? null,
+    hasMore: data.hasMore,
   }
 }

@@ -7,7 +7,9 @@ import { EmptyState } from '@/components/gallery/EmptyState'
 import { LoadingState } from '@/components/gallery/LoadingState'
 import { Button } from '@/components/ui/Button'
 import { usePhotos } from '@/context/PhotosContext'
-import { AlertCircle, RefreshCw, CheckCircle2 } from 'lucide-react'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { InfiniteScrollFooter } from '@/components/gallery/InfiniteScrollFooter'
+import { AlertCircle, CheckCircle2 } from 'lucide-react'
 
 interface PhotosPageProps {
   onSelectPhoto: (photo: Photo, photosList: Photo[]) => void
@@ -24,9 +26,11 @@ export function PhotosPage({
   const {
     photos,
     totalPhotos,
+    hasMore,
     isLoading,
     isLoadingMore,
     error,
+    loadMoreError,
     sortOption,
     setSortOption,
     viewMode,
@@ -56,6 +60,12 @@ export function PhotosPage({
     loadMore,
     handleScan,
   } = usePhotos()
+
+  const { sentinelRef } = useInfiniteScroll({
+    onLoadMore: loadMore,
+    hasMore,
+    isLoading: isLoadingMore,
+  })
 
   // 1. Initial mount: read URL search parameters into state
   useEffect(() => {
@@ -253,24 +263,15 @@ export function PhotosPage({
             ))}
           </div>
 
-          {photos.length < totalPhotos && (
-            <div className="flex justify-center pt-6 pb-2">
-              <Button
-                variant="outline"
-                size="md"
-                onClick={loadMore}
-                disabled={isLoadingMore}
-                className="gap-2"
-              >
-                {isLoadingMore && <RefreshCw className="w-4 h-4 animate-spin text-primary" />}
-                <span>
-                  {isLoadingMore
-                    ? 'Loading photos...'
-                    : `Load More Photos (${photos.length} of ${totalPhotos})`}
-                </span>
-              </Button>
-            </div>
-          )}
+          <InfiniteScrollFooter
+            sentinelRef={sentinelRef}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            error={loadMoreError}
+            onRetry={loadMore}
+            loadedCount={photos.length}
+            totalCount={totalPhotos}
+          />
         </>
       ) : (
         <>
@@ -285,24 +286,15 @@ export function PhotosPage({
             ))}
           </div>
 
-          {photos.length < totalPhotos && (
-            <div className="flex justify-center pt-6 pb-2">
-              <Button
-                variant="outline"
-                size="md"
-                onClick={loadMore}
-                disabled={isLoadingMore}
-                className="gap-2"
-              >
-                {isLoadingMore && <RefreshCw className="w-4 h-4 animate-spin text-primary" />}
-                <span>
-                  {isLoadingMore
-                    ? 'Loading photos...'
-                    : `Load More Photos (${photos.length} of ${totalPhotos})`}
-                </span>
-              </Button>
-            </div>
-          )}
+          <InfiniteScrollFooter
+            sentinelRef={sentinelRef}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            error={loadMoreError}
+            onRetry={loadMore}
+            loadedCount={photos.length}
+            totalCount={totalPhotos}
+          />
         </>
       )}
     </div>

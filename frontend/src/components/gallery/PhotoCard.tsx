@@ -42,6 +42,7 @@ export function PhotoCard({
   if (viewMode === 'list') {
     return (
       <div
+        id={`photo-${photo.id}`}
         role="button"
         tabIndex={0}
         onClick={() => onSelect(photo)}
@@ -113,6 +114,7 @@ export function PhotoCard({
 
   return (
     <div
+      id={`photo-${photo.id}`}
       role="button"
       tabIndex={0}
       onClick={() => onSelect(photo)}

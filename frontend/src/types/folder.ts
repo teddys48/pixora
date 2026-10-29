@@ -37,9 +37,12 @@ export interface FolderContents {
   breadcrumbs: BreadcrumbItem[]
   folders: PhysicalFolder[]
   photos: Photo[]
+  items?: Photo[]
   totalPhotos: number
   limit: number
   offset: number
+  nextCursor?: string | null
+  hasMore?: boolean
   diskMediaCount: number
   unindexedCount: number
   hasUnindexedFiles: boolean

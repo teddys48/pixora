@@ -6,6 +6,8 @@ import { AddPhotosToAlbumModal } from '@/components/folders/AddPhotosToAlbumModa
 import { RenameFolderModal } from '@/components/folders/RenameFolderModal'
 import { DeleteFolderModal } from '@/components/folders/DeleteFolderModal'
 import { Button } from '@/components/ui/Button'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { InfiniteScrollFooter } from '@/components/gallery/InfiniteScrollFooter'
 import { Input } from '@/components/ui/Input'
 import {
   fetchAlbumPhotos,
@@ -23,11 +25,9 @@ import {
   Search,
   Grid,
   List,
-  RefreshCw,
   AlertCircle,
   CheckCircle2,
   Calendar,
-  Images,
 } from 'lucide-react'
 
 interface AlbumDetailViewProps {
@@ -47,9 +47,12 @@ export function AlbumDetailView({
 }: AlbumDetailViewProps) {
   const [photos, setPhotos] = useState<Photo[]>([])
   const [total, setTotal] = useState(album.photoCount)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
   const [successBanner, setSuccessBanner] = useState<string | null>(null)
 
   const [searchQuery, setSearchQuery] = useState('')
@@ -63,10 +66,13 @@ export function AlbumDetailView({
   const loadPhotos = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+    setLoadMoreError(null)
     try {
-      const res = await fetchAlbumPhotos(album.id, { limit: 50, offset: 0 })
+      const res = await fetchAlbumPhotos(album.id, { limit: 50 })
       setPhotos(res.photos)
       setTotal(res.total)
+      setHasMore(Boolean(res.hasMore))
+      setNextCursor(res.nextCursor ?? null)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load album photos'
       setError(msg)
@@ -79,20 +85,34 @@ export function AlbumDetailView({
     loadPhotos()
   }, [loadPhotos])
 
-  const loadMorePhotos = async () => {
-    if (isLoadingMore || photos.length >= total) return
+  const loadMorePhotos = useCallback(async () => {
+    if (isLoadingMore || !hasMore || !nextCursor) return
     setIsLoadingMore(true)
+    setLoadMoreError(null)
     try {
-      const res = await fetchAlbumPhotos(album.id, { limit: 50, offset: photos.length })
-      setPhotos((prev) => [...prev, ...res.photos])
+      const res = await fetchAlbumPhotos(album.id, { limit: 50, cursor: nextCursor })
+      setPhotos((prev) => {
+        const existing = new Set(prev.map((p) => p.id))
+        const unique = res.photos.filter((p) => !existing.has(p.id))
+        return [...prev, ...unique]
+      })
       setTotal(res.total)
+      setHasMore(Boolean(res.hasMore))
+      setNextCursor(res.nextCursor ?? null)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load more photos'
-      setError(msg)
+      setLoadMoreError(msg)
     } finally {
       setIsLoadingMore(false)
     }
-  }
+  }, [album.id, isLoadingMore, hasMore, nextCursor])
+
+  const { sentinelRef } = useInfiniteScroll({
+    onLoadMore: loadMorePhotos,
+    hasMore,
+    isLoading: isLoadingMore,
+    disabled: Boolean(searchQuery.trim()),
+  })
 
   const handleRemovePhoto = async (photo: Photo) => {
     if (isRemovingId) return
@@ -342,27 +362,16 @@ export function AlbumDetailView({
             ))}
           </div>
 
-          {photos.length < total && (
-            <div className="flex justify-center pt-6 pb-2">
-              <Button
-                variant="outline"
-                size="md"
-                onClick={loadMorePhotos}
-                disabled={isLoadingMore}
-                className="gap-2 text-xs"
-              >
-                {isLoadingMore ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-primary" />
-                ) : (
-                  <Images className="w-4 h-4 text-muted-foreground" />
-                )}
-                <span>
-                  {isLoadingMore
-                    ? 'Loading photos...'
-                    : `Load More Photos (${photos.length} of ${total})`}
-                </span>
-              </Button>
-            </div>
+          {!searchQuery.trim() && (
+            <InfiniteScrollFooter
+              sentinelRef={sentinelRef}
+              hasMore={hasMore}
+              isLoadingMore={isLoadingMore}
+              error={loadMoreError}
+              onRetry={loadMorePhotos}
+              loadedCount={photos.length}
+              totalCount={total}
+            />
           )}
         </>
       ) : (
@@ -380,27 +389,16 @@ export function AlbumDetailView({
             ))}
           </div>
 
-          {photos.length < total && (
-            <div className="flex justify-center pt-6 pb-2">
-              <Button
-                variant="outline"
-                size="md"
-                onClick={loadMorePhotos}
-                disabled={isLoadingMore}
-                className="gap-2 text-xs"
-              >
-                {isLoadingMore ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-primary" />
-                ) : (
-                  <Images className="w-4 h-4 text-muted-foreground" />
-                )}
-                <span>
-                  {isLoadingMore
-                    ? 'Loading photos...'
-                    : `Load More Photos (${photos.length} of ${total})`}
-                </span>
-              </Button>
-            </div>
+          {!searchQuery.trim() && (
+            <InfiniteScrollFooter
+              sentinelRef={sentinelRef}
+              hasMore={hasMore}
+              isLoadingMore={isLoadingMore}
+              error={loadMoreError}
+              onRetry={loadMorePhotos}
+              loadedCount={photos.length}
+              totalCount={total}
+            />
           )}
         </>
       )}

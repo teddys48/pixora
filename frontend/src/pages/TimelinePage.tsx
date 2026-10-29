@@ -3,12 +3,13 @@ import { Photo } from '@/types/photo'
 import { PhotoCard } from '@/components/gallery/PhotoCard'
 import { fetchTimeline } from '@/lib/api'
 import { LoadingState } from '@/components/gallery/LoadingState'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { InfiniteScrollFooter } from '@/components/gallery/InfiniteScrollFooter'
 import {
   Calendar,
   Clock,
   Images,
   AlertCircle,
-  RefreshCw,
   HelpCircle,
   CalendarDays,
 } from 'lucide-react'
@@ -66,20 +67,22 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
   const [timelinePhotos, setTimelinePhotos] = useState<Photo[]>([])
   const [totalPhotos, setTotalPhotos] = useState(0)
   const [hasMore, setHasMore] = useState(false)
-  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
 
   const loadInitialTimeline = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+    setLoadMoreError(null)
     try {
-      const data = await fetchTimeline({ limit: 50, offset: 0 })
+      const data = await fetchTimeline({ limit: 50 })
       setTimelinePhotos(data.photos)
       setTotalPhotos(data.total)
-      setHasMore(data.hasMore)
-      setNextCursor(data.nextCursor)
+      setHasMore(Boolean(data.hasMore))
+      setNextCursor(data.nextCursor ?? null)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load timeline photos'
       setError(msg)
@@ -92,28 +95,38 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
     loadInitialTimeline()
   }, [loadInitialTimeline])
 
-  const handleLoadMore = async () => {
-    if (isLoadingMore || !hasMore) return
+  const handleLoadMore = useCallback(async () => {
+    if (isLoadingMore || !hasMore || !nextCursor) return
     setIsLoadingMore(true)
+    setLoadMoreError(null)
 
     try {
       const data = await fetchTimeline({
         limit: 50,
-        offset: timelinePhotos.length,
         cursor: nextCursor,
       })
 
-      setTimelinePhotos((prev) => [...prev, ...data.photos])
+      setTimelinePhotos((prev) => {
+        const existing = new Set(prev.map((p) => p.id))
+        const unique = data.photos.filter((p) => !existing.has(p.id))
+        return [...prev, ...unique]
+      })
       setTotalPhotos(data.total)
-      setHasMore(data.hasMore)
-      setNextCursor(data.nextCursor)
+      setHasMore(Boolean(data.hasMore))
+      setNextCursor(data.nextCursor ?? null)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load more photos'
-      setError(msg)
+      setLoadMoreError(msg)
     } finally {
       setIsLoadingMore(false)
     }
-  }
+  }, [isLoadingMore, hasMore, nextCursor])
+
+  const { sentinelRef } = useInfiniteScroll({
+    onLoadMore: handleLoadMore,
+    hasMore,
+    isLoading: isLoadingMore,
+  })
 
   // Group photos into Month Sections containing Day Groups, plus a separate Undated Group
   const { monthSections, undatedPhotos } = useMemo(() => {
@@ -327,32 +340,17 @@ export function TimelinePage({ onSelectPhoto }: TimelinePageProps) {
             </div>
           )}
 
-          {/* Incremental Loading / Load More */}
-          {hasMore && (
-            <div className="flex flex-col items-center justify-center pt-8 pb-4 gap-2">
-              <Button
-                variant="outline"
-                size="md"
-                onClick={handleLoadMore}
-                disabled={isLoadingMore}
-                className="gap-2 px-6"
-              >
-                {isLoadingMore ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-primary" />
-                ) : (
-                  <CalendarDays className="w-4 h-4 text-primary" />
-                )}
-                <span>
-                  {isLoadingMore
-                    ? 'Loading photos...'
-                    : `Load More Moments (${timelinePhotos.length} of ${totalPhotos})`}
-                </span>
-              </Button>
-              <p className="text-xs text-muted-foreground font-mono">
-                Showing {timelinePhotos.length} of {totalPhotos} photos
-              </p>
-            </div>
-          )}
+          {/* Infinite Scroll Footer */}
+          <InfiniteScrollFooter
+            sentinelRef={sentinelRef}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            error={loadMoreError}
+            onRetry={handleLoadMore}
+            loadedCount={timelinePhotos.length}
+            totalCount={totalPhotos}
+            endMessage={`All ${totalPhotos} moments loaded`}
+          />
         </div>
       )}
     </div>

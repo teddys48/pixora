@@ -47,14 +47,14 @@ Authentication and access control must be reconsidered before exposing the appli
 | Icons | Lucide React | Implemented | Standard SVG icons across shell, cards, modals, filter panel & action toolbars |
 | Routing | React Router v6 | Implemented | Client-side routing with Go SPA fallback (`/`, `/photos`, `/timeline`, `/folders`, `/folders/:albumId`), synchronized URL query params |
 | Backend | Go 1.22+ + Fiber v2 | Implemented | Package separation (config, storage, database, repository, api, server, media, scanner) |
-| Database | SQLite via `modernc.org/sqlite` | Implemented | Pure Go (CGO_ENABLED=0), WAL mode, foreign keys, versioned migrations (v1, v2, v3) |
+| Database | SQLite via `modernc.org/sqlite` | Implemented | Pure Go (CGO_ENABLED=0), WAL mode, foreign keys, versioned migrations (v1, v2, v3, v4) |
 | Image Processing | Pure-Go decoders & bilinear scaling | Implemented | `image/jpeg`, `image/png`, `image/gif`, `golang.org/x/image/webp`, `golang.org/x/image/tiff`, `golang.org/x/image/draw` |
 | EXIF Parser | `github.com/rwcarlsen/goexif` | Implemented | Pure Go, extracts `DateTimeOriginal`, timestamps, orientation tags (1-8), and camera/lens/exposure details |
 | Photo storage | Local host bind mount (`/media`) | Implemented | Target `STORAGE_ROOT=/media`; safe path traversal checks; read-write mount preserved; read-only folder browsing |
 | Database storage | Separate persistent volume (`/data`) | Implemented | Target `DATABASE_PATH=/data/pixora.db`; parent dir auto-created; never stored in photo dir |
 | Path convention | Relative storage paths in database | Implemented | Relative paths (e.g. `originals/...`, `Pictures/vacation/beach.jpg`); validated with `internal/storage` |
 | Container access | Non-root `pixora` user (UID 1000) | Implemented | Host permissions documented; no write checks at startup |
-| API style | REST + JSON | Implemented | Query parameters for discovery (`q`, `startDate`, `endDate`, `folder`, `albumId`, `mediaType`, `isUndated`, `sort`, `order`); structured error envelopes |
+| API style | REST + JSON | Implemented | Query parameters for discovery and cursor pagination (`cursor`, `limit`, `q`, `startDate`, `endDate`, `folder`, `albumId`, `mediaType`, `isUndated`, `sort`, `order`); opaque base64 scope tokens; structured error envelopes |
 | Deployment | Unified Multi-Stage Dockerfile | Implemented | Builds FE & BE into a single non-root Alpine container (`CGO_ENABLED=0`) |
 | Theme | Light, Dark, and System | Implemented | Persisted in `localStorage`, media query sync |
 
@@ -297,7 +297,7 @@ ok  	pixora/backend/internal/server	0.164s
 PASS
 ok  	pixora/backend/internal/storage	0.002s
 
-All 55 Go tests passed (0 failures).
+All 58 Go tests passed (0 failures, including cursor verification suite).
 ```
 
 ### Frontend Build & Lint Checks (`frontend`)

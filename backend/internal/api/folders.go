@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"pixora/backend/internal/media"
+	"pixora/backend/internal/models"
 	"pixora/backend/internal/repository"
 	"pixora/backend/internal/storage"
 )
@@ -53,9 +54,12 @@ type FolderContentsResponse struct {
 	Breadcrumbs       []BreadcrumbItem     `json:"breadcrumbs"`
 	Folders           []PhysicalFolderItem `json:"folders"`
 	Photos            []PhotoResponse      `json:"photos"`
+	Items             []PhotoResponse      `json:"items"`
 	TotalPhotos       int                  `json:"totalPhotos"`
 	Limit             int                  `json:"limit"`
 	Offset            int                  `json:"offset"`
+	NextCursor        *string              `json:"nextCursor"`
+	HasMore           bool                 `json:"hasMore"`
 	DiskMediaCount    int                  `json:"diskMediaCount"`
 	UnindexedCount    int                  `json:"unindexedCount"`
 	HasUnindexedFiles bool                 `json:"hasUnindexedFiles"`
@@ -334,7 +338,36 @@ func GetFolderContentsHandler(store *storage.Storage, repo repository.PhotoRepos
 		sortBy := c.Query("sort", "date")
 		order := c.Query("order", "desc")
 
-		photos, totalPhotos, err := repo.ListByFolder(c.Context(), canonicalRel, offset, limit, sortBy, order)
+		scope := ComputeFolderScope(canonicalRel, sortBy, order)
+		var cursor *repository.CursorData
+		if cursorStr := c.Query("cursor"); cursorStr != "" {
+			cData, err := DecodeCursor(cursorStr, scope)
+			if err != nil {
+				return SendError(c, fiber.StatusBadRequest, "validation_error", fmt.Sprintf("invalid cursor: %v", err))
+			}
+			cursor = cData
+		}
+
+		var photos []models.Photo
+		var totalPhotos int
+		var hasMore bool
+		var nextCursorData *repository.CursorData
+
+		if cursor != nil {
+			photos, totalPhotos, hasMore, nextCursorData, err = repo.ListByFolderCursor(c.Context(), canonicalRel, limit, sortBy, order, cursor)
+		} else {
+			// Offset or initial page
+			filter := repository.PhotoFilter{
+				Folder:    canonicalRel,
+				Recursive: false,
+				SortBy:    sortBy,
+				SortOrder: order,
+				Limit:     limit,
+				Offset:    offset,
+			}
+			photos, totalPhotos, hasMore, nextCursorData, err = repo.SearchAndFilterCursor(c.Context(), filter)
+		}
+
 		if err != nil {
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list folder photos")
 		}
@@ -354,6 +387,14 @@ func GetFolderContentsHandler(store *storage.Storage, repo repository.PhotoRepos
 			folderName = filepath.Base(canonicalRel)
 		}
 
+		var nextCursor *string
+		if hasMore && nextCursorData != nil {
+			token, err := EncodeCursor(nextCursorData, scope)
+			if err == nil {
+				nextCursor = &token
+			}
+		}
+
 		return c.Status(fiber.StatusOK).JSON(FolderContentsResponse{
 			Name:              folderName,
 			Path:              canonicalRel,
@@ -361,9 +402,12 @@ func GetFolderContentsHandler(store *storage.Storage, repo repository.PhotoRepos
 			Breadcrumbs:       buildBreadcrumbs(canonicalRel),
 			Folders:           folders,
 			Photos:            photoResponses,
+			Items:             photoResponses,
 			TotalPhotos:       totalPhotos,
 			Limit:             limit,
 			Offset:            offset,
+			NextCursor:        nextCursor,
+			HasMore:           hasMore,
 			DiskMediaCount:    diskMediaCount,
 			UnindexedCount:    unindexed,
 			HasUnindexedFiles: unindexed > 0,
@@ -408,7 +452,35 @@ func GetFolderPhotosHandler(store *storage.Storage, repo repository.PhotoReposit
 		sortBy := c.Query("sort", "date")
 		order := c.Query("order", "desc")
 
-		photos, total, err := repo.ListByFolder(c.Context(), canonicalRel, offset, limit, sortBy, order)
+		scope := ComputeFolderScope(canonicalRel, sortBy, order)
+		var cursor *repository.CursorData
+		if cursorStr := c.Query("cursor"); cursorStr != "" {
+			cData, err := DecodeCursor(cursorStr, scope)
+			if err != nil {
+				return SendError(c, fiber.StatusBadRequest, "validation_error", fmt.Sprintf("invalid cursor: %v", err))
+			}
+			cursor = cData
+		}
+
+		var photos []models.Photo
+		var total int
+		var hasMore bool
+		var nextCursorData *repository.CursorData
+
+		if cursor != nil {
+			photos, total, hasMore, nextCursorData, err = repo.ListByFolderCursor(c.Context(), canonicalRel, limit, sortBy, order, cursor)
+		} else {
+			filter := repository.PhotoFilter{
+				Folder:    canonicalRel,
+				Recursive: false,
+				SortBy:    sortBy,
+				SortOrder: order,
+				Limit:     limit,
+				Offset:    offset,
+			}
+			photos, total, hasMore, nextCursorData, err = repo.SearchAndFilterCursor(c.Context(), filter)
+		}
+
 		if err != nil {
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list folder photos")
 		}
@@ -418,12 +490,23 @@ func GetFolderPhotosHandler(store *storage.Storage, repo repository.PhotoReposit
 			photoResponses = append(photoResponses, ToPhotoResponse(p))
 		}
 
+		var nextCursor *string
+		if hasMore && nextCursorData != nil {
+			token, err := EncodeCursor(nextCursorData, scope)
+			if err == nil {
+				nextCursor = &token
+			}
+		}
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"path":   canonicalRel,
-			"photos": photoResponses,
-			"total":  total,
-			"limit":  limit,
-			"offset": offset,
+			"path":       canonicalRel,
+			"photos":     photoResponses,
+			"items":      photoResponses,
+			"total":      total,
+			"limit":      limit,
+			"offset":     offset,
+			"nextCursor": nextCursor,
+			"hasMore":    hasMore,
 		})
 	}
 }

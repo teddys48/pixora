@@ -28,6 +28,9 @@ interface LightboxModalProps {
   isOpen: boolean
   onClose: () => void
   onNavigate: (photo: Photo) => void
+  hasMore?: boolean
+  onLoadMore?: () => void
+  isLoadingMore?: boolean
 }
 
 export function LightboxModal({
@@ -36,6 +39,9 @@ export function LightboxModal({
   isOpen,
   onClose,
   onNavigate,
+  hasMore = false,
+  onLoadMore,
+  isLoadingMore = false,
 }: LightboxModalProps) {
   const [showInfo, setShowInfo] = useState(false)
   const [zoomScale, setZoomScale] = useState(1)
@@ -49,7 +55,9 @@ export function LightboxModal({
 
   const currentIndex = photo ? photos.findIndex((p) => p.id === photo.id) : -1
   const hasPrev = currentIndex > 0
-  const hasNext = currentIndex >= 0 && currentIndex < photos.length - 1
+  const hasNext = currentIndex >= 0 && (currentIndex < photos.length - 1 || Boolean(hasMore))
+
+  const pendingNextRef = useRef(false)
 
   // Reset zoom & pan when switching photos or closing
   const resetZoom = useCallback(() => {
@@ -64,6 +72,21 @@ export function LightboxModal({
     setImgHasError(false)
   }, [photo?.id, resetZoom])
 
+  // Speculatively load next page when approaching end of collection
+  useEffect(() => {
+    if (currentIndex >= photos.length - 2 && hasMore && onLoadMore && !isLoadingMore) {
+      onLoadMore()
+    }
+  }, [currentIndex, photos.length, hasMore, onLoadMore, isLoadingMore])
+
+  // Advance photo if user was waiting at collection boundary for next page
+  useEffect(() => {
+    if (pendingNextRef.current && currentIndex >= 0 && currentIndex < photos.length - 1) {
+      pendingNextRef.current = false
+      onNavigate(photos[currentIndex + 1])
+    }
+  }, [photos, currentIndex, onNavigate])
+
   const handlePrev = useCallback(() => {
     if (hasPrev) {
       onNavigate(photos[currentIndex - 1])
@@ -71,10 +94,23 @@ export function LightboxModal({
   }, [hasPrev, photos, currentIndex, onNavigate])
 
   const handleNext = useCallback(() => {
-    if (hasNext) {
+    if (currentIndex >= 0 && currentIndex < photos.length - 1) {
       onNavigate(photos[currentIndex + 1])
+    } else if (hasMore && onLoadMore) {
+      pendingNextRef.current = true
+      onLoadMore()
     }
-  }, [hasNext, photos, currentIndex, onNavigate])
+  }, [currentIndex, photos, hasMore, onLoadMore, onNavigate])
+
+  const handleClose = useCallback(() => {
+    handleClose()
+    if (photo?.id) {
+      setTimeout(() => {
+        const el = document.getElementById(`photo-${photo.id}`)
+        el?.scrollIntoView({ block: "nearest" })
+      }, 50)
+    }
+  }, [onClose, photo?.id])
 
   const handleZoomIn = useCallback(() => {
     setZoomScale((prev) => Math.min(prev + 0.5, 4))
@@ -163,7 +199,7 @@ export function LightboxModal({
       }
 
       if (e.key === 'Escape') {
-        onClose()
+        handleClose()
       } else if (e.key === 'ArrowLeft') {
         handlePrev()
       } else if (e.key === 'ArrowRight') {
@@ -272,7 +308,7 @@ export function LightboxModal({
 
           {/* Close button */}
           <button
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="Close viewer"
             className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white"
             title="Close (Esc)"
@@ -304,7 +340,11 @@ export function LightboxModal({
             className="absolute right-4 top-1/2 -translate-y-1/2 z-30 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white/80 hover:text-white hover:bg-black/90 backdrop-blur-sm border border-white/10 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
             title="Next (Arrow Right)"
           >
-            <ChevronRight className="h-6 w-6" />
+            {isLoadingMore && currentIndex === photos.length - 1 ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <ChevronRight className="h-6 w-6" />
+            )}
           </button>
         )}
 

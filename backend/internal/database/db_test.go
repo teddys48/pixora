@@ -52,14 +52,14 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		t.Fatalf("Expected db file to exist at %s, got: %v", dbPath, err)
 	}
 
-	// Verify schema_migrations has version 1, 2, and 3 recorded
+	// Verify schema_migrations has version 1, 2, 3, and 4 recorded
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3)").Scan(&count)
+	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4)").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to query schema_migrations: %v", err)
 	}
-	if count != 3 {
-		t.Errorf("Expected migrations 1, 2, and 3 to be recorded, got count %d", count)
+	if count != 4 {
+		t.Errorf("Expected migrations 1, 2, 3, and 4 to be recorded, got count %d", count)
 	}
 
 	// Verify tables exist
@@ -85,6 +85,7 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		"idx_albums_name_nocase",
 		"idx_photo_albums_album_id",
 		"idx_photo_albums_photo_id",
+		"idx_photo_albums_album_added",
 	}
 	for _, idx := range indexes {
 		var name string

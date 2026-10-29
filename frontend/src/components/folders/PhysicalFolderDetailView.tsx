@@ -4,6 +4,8 @@ import { Photo, PhotoViewMode } from '@/types/photo'
 import { PhysicalFolderCard } from '@/components/folders/PhysicalFolderCard'
 import { PhotoCard } from '@/components/gallery/PhotoCard'
 import { Button } from '@/components/ui/Button'
+import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
+import { InfiniteScrollFooter } from '@/components/gallery/InfiniteScrollFooter'
 import { Input } from '@/components/ui/Input'
 import { fetchFolderContents, fetchFolderPhotos, triggerScan } from '@/lib/api'
 import {
@@ -35,9 +37,12 @@ export function PhysicalFolderDetailView({
   const [contents, setContents] = useState<FolderContents | null>(null)
   const [photos, setPhotos] = useState<Photo[]>([])
   const [totalPhotos, setTotalPhotos] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [viewMode, setViewMode] = useState<PhotoViewMode>('grid')
@@ -48,12 +53,15 @@ export function PhysicalFolderDetailView({
   const loadFolder = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+    setLoadMoreError(null)
     setScanMessage(null)
     try {
-      const data = await fetchFolderContents(path, { limit: 50, offset: 0 })
+      const data = await fetchFolderContents(path, { limit: 50 })
       setContents(data)
       setPhotos(Array.isArray(data.photos) ? data.photos : [])
       setTotalPhotos(data.totalPhotos || 0)
+      setHasMore(Boolean(data.hasMore))
+      setNextCursor(data.nextCursor ?? null)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load folder contents'
       setError(msg)
@@ -66,20 +74,34 @@ export function PhysicalFolderDetailView({
     loadFolder()
   }, [loadFolder])
 
-  const loadMorePhotos = async () => {
-    if (isLoadingMore || photos.length >= totalPhotos) return
+  const loadMorePhotos = useCallback(async () => {
+    if (isLoadingMore || !hasMore || !nextCursor) return
     setIsLoadingMore(true)
+    setLoadMoreError(null)
     try {
-      const res = await fetchFolderPhotos(path, { limit: 50, offset: photos.length })
-      setPhotos((prev) => [...prev, ...(res.photos || [])])
+      const res = await fetchFolderPhotos(path, { limit: 50, cursor: nextCursor })
+      setPhotos((prev) => {
+        const existing = new Set(prev.map((p) => p.id))
+        const unique = (res.photos || []).filter((p) => !existing.has(p.id))
+        return [...prev, ...unique]
+      })
       setTotalPhotos(res.total || 0)
+      setHasMore(Boolean(res.hasMore))
+      setNextCursor(res.nextCursor ?? null)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load more photos'
-      setError(msg)
+      setLoadMoreError(msg)
     } finally {
       setIsLoadingMore(false)
     }
-  }
+  }, [path, isLoadingMore, hasMore, nextCursor])
+
+  const { sentinelRef } = useInfiniteScroll({
+    onLoadMore: loadMorePhotos,
+    hasMore,
+    isLoading: isLoadingMore,
+    disabled: Boolean(searchQuery.trim()),
+  })
 
   const handleScanFolder = async () => {
     setIsScanning(true)
@@ -376,28 +398,17 @@ export function PhysicalFolderDetailView({
               </div>
             )}
 
-            {/* Load More Button */}
-            {photos.length < totalPhotos && (
-              <div className="flex justify-center pt-2">
-                <Button
-                  onClick={loadMorePhotos}
-                  disabled={isLoadingMore}
-                  variant="outline"
-                  size="sm"
-                  className="gap-2 text-xs"
-                >
-                  {isLoadingMore ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Loading more...</span>
-                    </>
-                  ) : (
-                    <span>
-                      Load More Photos ({photos.length} of {totalPhotos})
-                    </span>
-                  )}
-                </Button>
-              </div>
+            {/* Infinite Scroll Footer */}
+            {!searchQuery.trim() && (
+              <InfiniteScrollFooter
+                sentinelRef={sentinelRef}
+                hasMore={hasMore}
+                isLoadingMore={isLoadingMore}
+                error={loadMoreError}
+                onRetry={loadMorePhotos}
+                loadedCount={photos.length}
+                totalCount={totalPhotos}
+              />
             )}
           </div>
         ) : (
