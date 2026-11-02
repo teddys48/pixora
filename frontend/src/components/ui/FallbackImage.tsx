@@ -73,6 +73,7 @@ export function FallbackImage({
         src={src}
         alt={alt}
         loading="lazy"
+        decoding="async"
         onLoad={() => setIsLoading(false)}
         onError={() => {
           setIsLoading(false)

@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -28,22 +29,39 @@ const (
 
 	// ThumbnailQuality is the JPEG compression quality for generated thumbnails.
 	ThumbnailQuality = 85
+
+	// MaxConcurrentImages is the maximum number of simultaneous image decodes allowed.
+	MaxConcurrentImages = 4
+
+	// MaxConcurrentVideos is the maximum number of simultaneous ffmpeg operations allowed.
+	MaxConcurrentVideos = 3
 )
 
 // ThumbnailService generates, caches, and serves thumbnails for photos and videos.
 type ThumbnailService struct {
 	storage   *storage.Storage
-	locks     sync.Map      // photoID -> *sync.Mutex
-	ffmpegSem chan struct{} // Concurrency limiter for ffmpeg
-	failedIDs sync.Map      // photoID -> time.Time
+	locks     [64]sync.Mutex // Striped locks to prevent memory leaks from unbounded key storage
+	ffmpegSem chan struct{}  // Concurrency limiter for ffmpeg
+	imageSem  chan struct{}  // Concurrency limiter for image decoding
+	failedIDs sync.Map       // photoID -> time.Time
 }
 
 // NewThumbnailService creates a new ThumbnailService.
 func NewThumbnailService(storage *storage.Storage) *ThumbnailService {
 	return &ThumbnailService{
 		storage:   storage,
-		ffmpegSem: make(chan struct{}, 3), // max 3 concurrent ffmpeg tasks
+		ffmpegSem: make(chan struct{}, MaxConcurrentVideos),
+		imageSem:  make(chan struct{}, MaxConcurrentImages),
 	}
+}
+
+// getLock returns the striped mutex for a specific photo ID.
+func (s *ThumbnailService) getLock(id string) *sync.Mutex {
+	var h uint32 = 2166136261
+	for i := 0; i < len(id); i++ {
+		h = (h ^ uint32(id[i])) * 16777619
+	}
+	return &s.locks[h%64]
 }
 
 // ThumbnailRelativePath returns the deterministic relative path for a media thumbnail.
@@ -51,8 +69,25 @@ func (s *ThumbnailService) ThumbnailRelativePath(photoID string) string {
 	return filepath.Join("thumbnails", fmt.Sprintf("%s.jpg", photoID))
 }
 
+// ClearFailed removes an ID from the negative failure cache (e.g. after file modification or rescan).
+func (s *ThumbnailService) ClearFailed(photoID string) {
+	s.failedIDs.Delete(photoID)
+}
+
+// isThumbnailFresh checks whether an existing thumbnail on disk is non-empty and newer than the source modification.
+func isThumbnailFresh(thumbInfo os.FileInfo, sourceModified time.Time) bool {
+	if thumbInfo.Size() == 0 {
+		return false
+	}
+	if !sourceModified.IsZero() && sourceModified.After(thumbInfo.ModTime()) {
+		// Source file was updated after thumbnail was created: thumbnail is stale
+		return false
+	}
+	return true
+}
+
 // GetOrGenerate returns the absolute path to the thumbnail for the given photo or video,
-// generating it if it does not yet exist.
+// generating it if it does not yet exist or if the source file has been modified.
 func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (string, error) {
 	if s.storage == nil {
 		return "", errors.New("storage unavailable")
@@ -64,8 +99,8 @@ func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (
 		return "", fmt.Errorf("failed to resolve thumbnail path: %w", err)
 	}
 
-	// 1. Check if thumbnail already exists and is non-empty
-	if info, err := os.Stat(resolvedThumb); err == nil && info.Size() > 0 {
+	// 1. Fast path: check if thumbnail already exists, is non-empty, and is fresh
+	if info, err := os.Stat(resolvedThumb); err == nil && isThumbnailFresh(info, p.FileModifiedAt) {
 		return resolvedThumb, nil
 	}
 
@@ -76,14 +111,13 @@ func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (
 		}
 	}
 
-	// 3. Obtain lock for this photo ID to avoid duplicate concurrent generation
-	lockVal, _ := s.locks.LoadOrStore(p.ID, &sync.Mutex{})
-	mu := lockVal.(*sync.Mutex)
+	// 3. Obtain striped lock for this photo ID to avoid duplicate concurrent generation
+	mu := s.getLock(p.ID)
 	mu.Lock()
 	defer mu.Unlock()
 
 	// Double-check after acquiring lock
-	if info, err := os.Stat(resolvedThumb); err == nil && info.Size() > 0 {
+	if info, err := os.Stat(resolvedThumb); err == nil && isThumbnailFresh(info, p.FileModifiedAt) {
 		return resolvedThumb, nil
 	}
 
@@ -115,7 +149,14 @@ func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (
 	}
 	defer f.Close()
 
-	// 6. Generate image thumbnail to disk
+	// 6. Generate image thumbnail to disk with bounded concurrency
+	select {
+	case s.imageSem <- struct{}{}:
+		defer func() { <-s.imageSem }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
 	if err := s.generateThumbnail(f, resolvedThumb); err != nil {
 		s.failedIDs.Store(p.ID, time.Now().UTC())
 		return "", err
@@ -203,8 +244,11 @@ func (s *ThumbnailService) generateThumbnail(r io.Reader, targetPath string) err
 		}
 	}
 
+	// Use buffered reader for smooth decoding
+	bufReader := bufio.NewReaderSize(r, 64*1024)
+
 	// Decode original image
-	srcImg, _, err := image.Decode(r)
+	srcImg, _, err := image.Decode(bufReader)
 	if err != nil {
 		return fmt.Errorf("%w: failed to decode source image: %v", ErrInvalidImage, err)
 	}
@@ -241,15 +285,23 @@ func (s *ThumbnailService) generateThumbnail(r io.Reader, targetPath string) err
 		return fmt.Errorf("failed to create temporary thumbnail file: %w", err)
 	}
 
-	encodeErr := jpeg.Encode(tmpFile, thumbImg, &jpeg.Options{Quality: ThumbnailQuality})
+	// Buffered write for fast flush to disk
+	bufWriter := bufio.NewWriterSize(tmpFile, 64*1024)
+	encodeErr := jpeg.Encode(bufWriter, thumbImg, &jpeg.Options{Quality: ThumbnailQuality})
+	flushErr := bufWriter.Flush()
 	closeErr := tmpFile.Close()
+
 	if encodeErr != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to encode thumbnail jpeg: %w", encodeErr)
 	}
+	if flushErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to flush thumbnail buffer: %w", flushErr)
+	}
 	if closeErr != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to flush thumbnail file: %w", closeErr)
+		return fmt.Errorf("failed to close thumbnail file: %w", closeErr)
 	}
 
 	// Atomic rename to final path

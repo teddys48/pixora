@@ -571,7 +571,7 @@ func ServeOriginalPhotoHandler(repo repository.PhotoRepository, store *storage.S
 		c.Set("ETag", etag)
 		c.Set("Last-Modified", info.ModTime().UTC().Format(time.RFC1123))
 
-		if c.Get("If-None-Match") == etag {
+		if checkNotModified(c, etag, info.ModTime().UTC()) {
 			return c.SendStatus(fiber.StatusNotModified)
 		}
 
@@ -646,7 +646,7 @@ func ServeThumbnailHandler(repo repository.PhotoRepository, store *storage.Stora
 		c.Set("ETag", etag)
 		c.Set("Last-Modified", info.ModTime().UTC().Format(time.RFC1123))
 
-		if c.Get("If-None-Match") == etag {
+		if checkNotModified(c, etag, info.ModTime().UTC()) {
 			return c.SendStatus(fiber.StatusNotModified)
 		}
 
@@ -998,4 +998,21 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// checkNotModified verifies If-None-Match and If-Modified-Since HTTP conditional request headers.
+func checkNotModified(c *fiber.Ctx, etag string, modTime time.Time) bool {
+	if match := c.Get("If-None-Match"); match != "" {
+		if match == etag || match == "*" {
+			return true
+		}
+	}
+	if ims := c.Get("If-Modified-Since"); ims != "" {
+		if t, err := time.Parse(time.RFC1123, ims); err == nil {
+			if !modTime.Truncate(time.Second).After(t.Truncate(time.Second)) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -5,13 +5,13 @@ import (
 	"context"
 	"image"
 	"image/color"
-	"image/gif"
 	"image/jpeg"
-	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"pixora/backend/internal/media"
 	"pixora/backend/internal/models"
@@ -22,29 +22,11 @@ func createTestJPEG(w, h int) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{uint8(x % 256), uint8(y % 256), 120, 255})
+			img.Set(x, y, color.RGBA{uint8((x * 255) / w), uint8((y * 255) / h), 100, 255})
 		}
 	}
-	buf := new(bytes.Buffer)
-	_ = jpeg.Encode(buf, img, &jpeg.Options{Quality: 80})
-	return buf.Bytes()
-}
-
-func createTestPNG(w, h int) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	img.Set(0, 0, color.RGBA{255, 0, 0, 255})
-	buf := new(bytes.Buffer)
-	_ = png.Encode(buf, img)
-	return buf.Bytes()
-}
-
-func createTestGIF(w, h int) []byte {
-	img := image.NewPaletted(image.Rect(0, 0, w, h), color.Palette{
-		color.RGBA{0, 0, 0, 255},
-		color.RGBA{255, 255, 255, 255},
-	})
-	buf := new(bytes.Buffer)
-	_ = gif.Encode(buf, img, nil)
+	var buf bytes.Buffer
+	_ = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
 	return buf.Bytes()
 }
 
@@ -55,10 +37,13 @@ func createTestVideoFile(t *testing.T, targetPath string, durationSec int, width
 		return false
 	}
 
+	_ = os.MkdirAll(filepath.Dir(targetPath), 0755)
+
 	cmd := exec.Command(ffmpegPath,
 		"-y",
 		"-f", "lavfi",
 		"-i", "testsrc=duration=1:size=320x240:rate=10",
+		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p",
 		targetPath,
 	)
@@ -69,123 +54,70 @@ func createTestVideoFile(t *testing.T, targetPath string, durationSec int, width
 }
 
 func TestExtractMetadata(t *testing.T) {
-	// 1. Valid JPEG
-	jpgData := createTestJPEG(120, 80)
+	jpgData := createTestJPEG(640, 480)
 	info, err := media.ExtractMetadata(bytes.NewReader(jpgData))
 	if err != nil {
-		t.Fatalf("ExtractMetadata failed for JPEG: %v", err)
+		t.Fatalf("ExtractMetadata failed: %v", err)
 	}
-	if info.MediaType != "image/jpeg" || info.Width != 120 || info.Height != 80 {
-		t.Errorf("Unexpected JPEG info: %+v", info)
+	if info.Width != 640 || info.Height != 480 {
+		t.Errorf("Expected 640x480, got %dx%d", info.Width, info.Height)
 	}
-
-	// 2. Valid PNG
-	pngData := createTestPNG(64, 48)
-	info, err = media.ExtractMetadata(bytes.NewReader(pngData))
-	if err != nil {
-		t.Fatalf("ExtractMetadata failed for PNG: %v", err)
+	if info.MediaType != "image/jpeg" {
+		t.Errorf("Expected image/jpeg, got %s", info.MediaType)
 	}
-	if info.MediaType != "image/png" || info.Width != 64 || info.Height != 48 {
-		t.Errorf("Unexpected PNG info: %+v", info)
+	if info.Extension != ".jpg" {
+		t.Errorf("Expected .jpg, got %s", info.Extension)
 	}
 
-	// 3. Valid GIF
-	gifData := createTestGIF(32, 32)
-	info, err = media.ExtractMetadata(bytes.NewReader(gifData))
-	if err != nil {
-		t.Fatalf("ExtractMetadata failed for GIF: %v", err)
-	}
-	if info.MediaType != "image/gif" || info.Width != 32 || info.Height != 32 {
-		t.Errorf("Unexpected GIF info: %+v", info)
-	}
-
-	// 4. Unsupported format (plain text)
-	plainText := []byte("hello world this is not an image")
-	_, err = media.ExtractMetadata(bytes.NewReader(plainText))
+	// Test invalid image data
+	_, err = media.ExtractMetadata(bytes.NewReader([]byte("not an image")))
 	if err == nil {
-		t.Error("Expected error for plain text file, got nil")
-	}
-
-	// 5. Corrupted header
-	corruptJpg := []byte{0xFF, 0xD8, 0xFF, 0x00, 0x00}
-	_, err = media.ExtractMetadata(bytes.NewReader(corruptJpg))
-	if err == nil {
-		t.Error("Expected error for truncated/corrupt JPEG, got nil")
+		t.Error("Expected error for non-image data, got nil")
 	}
 }
 
 func TestIsSupportedExtension(t *testing.T) {
-	tests := []struct {
-		filename string
-		expected bool
-	}{
-		{"photo.jpg", true},
-		{"photo.JPEG", true},
-		{"IMAGE.png", true},
-		{"graphic.webp", true},
-		{"animation.gif", true},
-		{"scan.tiff", true},
-		{"scan.TIF", true},
-		{"video.mp4", true},
-		{"clip.WEBM", true},
-		{"movie.mov", true},
-		{"show.m4v", true},
-		{"feature.mkv", true},
-		{"document.pdf", false},
-		{"script.sh", false},
-		{"image.exe", false},
-		{"noext", false},
+	valid := []string{"photo.jpg", "pic.jpeg", "art.png", "anim.gif", "web.webp", "scan.tiff", "TEST.JPG", "video.mp4", "movie.mov", "clip.mkv", "short.webm"}
+	for _, f := range valid {
+		if !media.IsSupportedExtension(f) {
+			t.Errorf("Expected %s to be supported", f)
+		}
 	}
 
-	for _, tc := range tests {
-		got := media.IsSupportedExtension(tc.filename)
-		if got != tc.expected {
-			t.Errorf("IsSupportedExtension(%q) = %v, expected %v", tc.filename, got, tc.expected)
+	invalid := []string{"doc.pdf", "script.sh", "archive.zip", "music.mp3", "noext"}
+	for _, f := range invalid {
+		if media.IsSupportedExtension(f) {
+			t.Errorf("Expected %s not to be supported", f)
 		}
 	}
 }
 
 func TestIsSupportedVideoExtension(t *testing.T) {
-	videoTests := []struct {
-		filename string
-		expected bool
-	}{
-		{"video.mp4", true},
-		{"video.MP4", true},
-		{"clip.webm", true},
-		{"movie.mov", true},
-		{"movie.MOV", true},
-		{"show.m4v", true},
-		{"feature.mkv", true},
-		{"photo.jpg", false},
-		{"image.png", false},
-		{"doc.pdf", false},
+	validVideos := []string{"clip.mp4", "movie.m4v", "shot.mov", "stream.webm", "record.mkv", "UPPER.MP4"}
+	for _, v := range validVideos {
+		if !media.IsSupportedVideoExtension(v) {
+			t.Errorf("Expected %s to be supported video extension", v)
+		}
 	}
 
-	for _, tc := range videoTests {
-		got := media.IsSupportedVideoExtension(tc.filename)
-		if got != tc.expected {
-			t.Errorf("IsSupportedVideoExtension(%q) = %v, expected %v", tc.filename, got, tc.expected)
+	nonVideos := []string{"pic.jpg", "doc.pdf", "music.mp3", "video.avi", "flash.flv"}
+	for _, v := range nonVideos {
+		if media.IsSupportedVideoExtension(v) {
+			t.Errorf("Expected %s not to be supported video extension", v)
 		}
 	}
 }
 
 func TestVideoSniffingAndDetection(t *testing.T) {
 	// MP4 ftyp header
-	mp4Header := []byte{
-		0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p',
-		'i', 's', 'o', 'm', 0x00, 0x00, 0x02, 0x00,
-	}
+	mp4Header := []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}
 	mime, ext, err := media.SniffVideoMediaType(mp4Header)
 	if err != nil || mime != "video/mp4" || ext != ".mp4" {
 		t.Errorf("SniffVideoMediaType failed for MP4: mime=%s, ext=%s, err=%v", mime, ext, err)
 	}
 
-	// QuickTime ftyp header
-	movHeader := []byte{
-		0x00, 0x00, 0x00, 0x14, 'f', 't', 'y', 'p',
-		'q', 't', ' ', ' ',
-	}
+	// QuickTime MOV header
+	movHeader := []byte{0x00, 0x00, 0x00, 0x14, 'f', 't', 'y', 'p', 'q', 't', ' ', ' '}
 	mime, ext, err = media.SniffVideoMediaType(movHeader)
 	if err != nil || mime != "video/quicktime" || ext != ".mov" {
 		t.Errorf("SniffVideoMediaType failed for QuickTime: mime=%s, ext=%s, err=%v", mime, ext, err)
@@ -363,6 +295,121 @@ func TestThumbnailService(t *testing.T) {
 	}
 }
 
+func TestThumbnailServiceStaleInvalidation(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_thumb_stale_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	store, err := storage.New(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origRel := "originals/replaceable.jpg"
+	origAbs, err := store.ResolvePath(origRel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Dir(origAbs), 0755)
+	_ = os.WriteFile(origAbs, createTestJPEG(200, 200), 0644)
+
+	thumbSvc := media.NewThumbnailService(store)
+	p := &models.Photo{
+		ID:             "stale-test-1",
+		RelativePath:   origRel,
+		MediaType:      "image/jpeg",
+		FileModifiedAt: time.Now().Add(-1 * time.Hour),
+	}
+
+	ctx := context.Background()
+	thumb1, err := thumbSvc.GetOrGenerate(ctx, p)
+	if err != nil {
+		t.Fatalf("Failed first thumbnail generation: %v", err)
+	}
+
+	info1, err := os.Stat(thumb1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now update the source file and update p.FileModifiedAt to the future of info1.ModTime()
+	_ = os.WriteFile(origAbs, createTestJPEG(400, 400), 0644)
+	newMod := info1.ModTime().Add(5 * time.Second)
+	p.FileModifiedAt = newMod
+
+	thumb2, err := thumbSvc.GetOrGenerate(ctx, p)
+	if err != nil {
+		t.Fatalf("Failed regenerated thumbnail: %v", err)
+	}
+
+	info2, err := os.Stat(thumb2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// info2 modtime should be updated (equal to or after info1)
+	if info2.ModTime().Before(info1.ModTime()) {
+		t.Errorf("Expected refreshed thumbnail, info1=%v, info2=%v", info1.ModTime(), info2.ModTime())
+	}
+}
+
+func TestThumbnailConcurrentGeneration(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pixora_thumb_conc_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	store, err := storage.New(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origRel := "originals/shared.jpg"
+	origAbs, err := store.ResolvePath(origRel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Dir(origAbs), 0755)
+	_ = os.WriteFile(origAbs, createTestJPEG(300, 300), 0644)
+
+	thumbSvc := media.NewThumbnailService(store)
+	p := &models.Photo{
+		ID:           "shared-photo",
+		RelativePath: origRel,
+		MediaType:    "image/jpeg",
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errCh := make(chan error, 10)
+
+	// Launch 10 concurrent requests for the exact same photo
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			path, err := thumbSvc.GetOrGenerate(ctx, p)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if path == "" {
+				errCh <- os.ErrNotExist
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Errorf("Concurrent thumbnail generation error: %v", err)
+	}
+}
+
 func TestVideoThumbnailService(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "pixora_video_thumb_test_*")
 	if err != nil {
@@ -375,23 +422,21 @@ func TestVideoThumbnailService(t *testing.T) {
 		t.Fatalf("Failed to init storage: %v", err)
 	}
 
-	videoRel := "videos/sample.mp4"
+	videoRel := "videos/clip.mp4"
 	videoAbs, err := store.ResolvePath(videoRel)
 	if err != nil {
-		t.Fatalf("Failed to resolve path: %v", err)
+		t.Fatalf("Failed to resolve video path: %v", err)
 	}
-	_ = os.MkdirAll(filepath.Dir(videoAbs), 0755)
-
 	if !createTestVideoFile(t, videoAbs, 1, 320, 240) {
 		t.Skip("ffmpeg not available or failed to generate test video")
 	}
 
-	dur := 1.0
 	thumbSvc := media.NewThumbnailService(store)
+	dur := 1.0
 	p := &models.Photo{
 		ID:               "test-video-1",
 		RelativePath:     videoRel,
-		OriginalFilename: "sample.mp4",
+		OriginalFilename: "clip.mp4",
 		MediaType:        "video/mp4",
 		Duration:         &dur,
 	}

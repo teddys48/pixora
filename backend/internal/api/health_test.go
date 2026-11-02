@@ -52,6 +52,20 @@ func TestHealthHandler(t *testing.T) {
 	}
 }
 
+func TestLivenessHandler(t *testing.T) {
+	app := fiber.New()
+	app.Get("/api/health/live", api.LivenessHandler)
+
+	req := httptest.NewRequest("GET", "/api/health/live", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Failed to test liveness request: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+}
+
 func TestNewHealthHandlerWithDBAndStorage(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "pixora_health_test_*")
 	if err != nil {
@@ -72,6 +86,7 @@ func TestNewHealthHandlerWithDBAndStorage(t *testing.T) {
 
 	app := fiber.New()
 	app.Get("/api/health", api.NewHealthHandler(db, store))
+	app.Get("/api/health/ready", api.ReadinessHandler(db, store))
 
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	resp, err := app.Test(req, -1)
@@ -101,5 +116,19 @@ func TestNewHealthHandlerWithDBAndStorage(t *testing.T) {
 	}
 	if healthResp.Storage != "ready" {
 		t.Errorf("Expected storage 'ready', got '%s'", healthResp.Storage)
+	}
+
+	// Test Readiness endpoint
+	reqReady := httptest.NewRequest("GET", "/api/health/ready", nil)
+	respReady, err := app.Test(reqReady, -1)
+	if err != nil || respReady.StatusCode != fiber.StatusOK {
+		t.Errorf("Expected readiness 200 OK, got: %d", respReady.StatusCode)
+	}
+
+	// Close DB and verify readiness returns 503 degraded
+	_ = db.Close()
+	respDegraded, err := app.Test(reqReady, -1)
+	if err != nil || respDegraded.StatusCode != fiber.StatusServiceUnavailable {
+		t.Errorf("Expected degraded readiness 503 Service Unavailable after DB close, got %d", respDegraded.StatusCode)
 	}
 }

@@ -92,6 +92,15 @@ ALTER TABLE photos ADD COLUMN container_format TEXT;
 ALTER TABLE photos ADD COLUMN thumbnail_status TEXT DEFAULT 'ready';
 `,
 	},
+	{
+		Version: 6,
+		Name:    "add_performance_composite_indexes",
+		SQL: `
+CREATE INDEX IF NOT EXISTS idx_photos_taken_at_id ON photos(taken_at DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_photos_file_modified_at_id ON photos(file_modified_at DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_photos_media_type_taken_at ON photos(media_type, taken_at DESC);
+`,
+	},
 }
 
 // Migrate applies all unapplied database migrations in transactional batches.

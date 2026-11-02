@@ -28,14 +28,24 @@ func HealthHandler(c *fiber.Ctx) error {
 	})
 }
 
-// NewHealthHandler returns a health check handler that inspects database and storage connectivity.
-func NewHealthHandler(db *database.DB, store *storage.Storage) fiber.Handler {
+// LivenessHandler returns a lightweight liveness check indicating the process is alive.
+func LivenessHandler(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"status":  "ok",
+		"service": "pixora-api",
+	})
+}
+
+// ReadinessHandler inspects critical runtime dependencies (database and storage read access).
+func ReadinessHandler(db *database.DB, store *storage.Storage) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		resp := HealthResponse{
 			Status:  "ok",
 			Service: "pixora-api",
 			Version: "0.1.0",
 		}
+
+		statusCode := fiber.StatusOK
 
 		if db != nil {
 			ctx, cancel := context.WithTimeout(c.Context(), 2*time.Second)
@@ -44,6 +54,7 @@ func NewHealthHandler(db *database.DB, store *storage.Storage) fiber.Handler {
 			if err := db.PingContext(ctx); err != nil {
 				resp.Status = "degraded"
 				resp.Database = "disconnected"
+				statusCode = fiber.StatusServiceUnavailable
 			} else {
 				resp.Database = "connected"
 			}
@@ -57,6 +68,11 @@ func NewHealthHandler(db *database.DB, store *storage.Storage) fiber.Handler {
 			}
 		}
 
-		return c.Status(fiber.StatusOK).JSON(resp)
+		return c.Status(statusCode).JSON(resp)
 	}
+}
+
+// NewHealthHandler returns a health check handler that inspects database and storage connectivity.
+func NewHealthHandler(db *database.DB, store *storage.Storage) fiber.Handler {
+	return ReadinessHandler(db, store)
 }

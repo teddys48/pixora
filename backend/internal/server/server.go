@@ -71,20 +71,35 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 	app.Use(logger.New(logger.Config{
 		Format:     "[${time}] ${status} - ${latency} ${method} ${path}\n",
 		TimeFormat: "2006-01-02 15:04:05",
+		Next: func(c *fiber.Ctx) bool {
+			// Skip logging high-frequency successful thumbnail requests to avoid log flooding
+			p := c.Path()
+			if strings.HasSuffix(p, "/thumbnail") && c.Response().StatusCode() < 400 {
+				return true
+			}
+			// Skip logging routine successful health checks
+			if (p == "/api/health" || p == "/api/health/live" || p == "/api/health/ready") && c.Response().StatusCode() == 200 {
+				return true
+			}
+			return false
+		},
 	}))
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept",
+		AllowHeaders: "Origin, Content-Type, Accept, Range, If-None-Match, If-Modified-Since",
 		AllowMethods: "GET, POST, HEAD, OPTIONS, PATCH, DELETE",
 	}))
 
 	// API Routes
 	apiGroup := app.Group("/api")
 
-	// Health check with database and storage inspection
+	// Health and readiness endpoints
+	apiGroup.Get("/health/live", api.LivenessHandler)
 	if deps.DB != nil || deps.Storage != nil {
+		apiGroup.Get("/health/ready", api.ReadinessHandler(deps.DB, deps.Storage))
 		apiGroup.Get("/health", api.NewHealthHandler(deps.DB, deps.Storage))
 	} else {
+		apiGroup.Get("/health/ready", api.HealthHandler)
 		apiGroup.Get("/health", api.HealthHandler)
 	}
 
@@ -156,7 +171,21 @@ func setupStaticAndSPA(app *fiber.App, staticDir string) {
 	cleanStaticDir := filepath.Clean(staticDir)
 	indexPath := filepath.Join(cleanStaticDir, "index.html")
 
-	// Serve static assets if the directory exists
+	// Serve hashed immutable frontend static assets (CSS, JS, fonts) with long-term caching
+	assetsDir := filepath.Join(cleanStaticDir, "assets")
+	if dirInfo, err := os.Stat(assetsDir); err == nil && dirInfo.IsDir() {
+		app.Static("/assets", assetsDir, fiber.Static{
+			Browse:   false,
+			Compress: true,
+			MaxAge:   31536000, // 1 year
+			ModifyResponse: func(c *fiber.Ctx) error {
+				c.Set("Cache-Control", "public, max-age=31536000, immutable")
+				return nil
+			},
+		})
+	}
+
+	// Serve root static assets (favicon.svg, robots.txt, etc.)
 	if dirInfo, err := os.Stat(cleanStaticDir); err == nil && dirInfo.IsDir() {
 		app.Static("/", cleanStaticDir, fiber.Static{
 			Browse:   false,
@@ -188,6 +217,7 @@ func setupStaticAndSPA(app *fiber.App, staticDir string) {
 		// Check if index.html exists
 		if _, err := os.Stat(indexPath); err == nil {
 			c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
+			c.Set("Cache-Control", "no-cache") // Ensure index.html is revalidated so updates take effect immediately
 			return c.SendFile(indexPath)
 		}
 

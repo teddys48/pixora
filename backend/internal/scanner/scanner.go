@@ -27,7 +27,7 @@ var (
 
 // ScanStatus represents the progress and result of a media scan operation.
 type ScanStatus struct {
-	Status     string     `json:"status"` // "idle", "running", "completed", "failed"
+	Status     string     `json:"status"` // "idle", "running", "completed", "failed", "canceled"
 	Scanned    int        `json:"scanned"`
 	Indexed    int        `json:"indexed"`
 	Updated    int        `json:"updated"`
@@ -46,6 +46,8 @@ type Scanner struct {
 	statusMu   sync.RWMutex
 	status     ScanStatus
 	isScanning atomic.Bool
+	cancelMu   sync.Mutex
+	cancelFunc context.CancelFunc
 }
 
 // New creates a new Scanner instance.
@@ -66,6 +68,15 @@ func (s *Scanner) Status() ScanStatus {
 	return s.status
 }
 
+// Cancel interrupts any active scan operation safely.
+func (s *Scanner) Cancel() {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if s.cancelFunc != nil {
+		s.cancelFunc()
+	}
+}
+
 // Scan performs media discovery and indexing across the entire storage root.
 func (s *Scanner) Scan(ctx context.Context) (ScanStatus, error) {
 	return s.ScanPath(ctx, "")
@@ -84,6 +95,17 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 		return s.Status(), ErrScanInProgress
 	}
 	defer s.isScanning.Store(false)
+
+	scanCtx, cancel := context.WithCancel(ctx)
+	s.cancelMu.Lock()
+	s.cancelFunc = cancel
+	s.cancelMu.Unlock()
+	defer func() {
+		s.cancelMu.Lock()
+		s.cancelFunc = nil
+		s.cancelMu.Unlock()
+		cancel()
+	}()
 
 	isRefresh := len(forceRefresh) > 0 && forceRefresh[0]
 
@@ -142,8 +164,8 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 	)
 
 	walkErr := filepath.WalkDir(walkStartDir, func(path string, d fs.DirEntry, err error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if scanCtx.Err() != nil {
+			return scanCtx.Err()
 		}
 
 		if err != nil {
@@ -215,7 +237,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 		isVideo := media.IsSupportedVideoExtension(name)
 
 		// Check if media is already in database
-		existing, err := s.photoRepo.GetByRelativePath(ctx, relPath)
+		existing, err := s.photoRepo.GetByRelativePath(scanCtx, relPath)
 		if err == nil && existing != nil {
 			// Record exists: check if file was modified (or force refresh requested)
 			if !isRefresh && existing.FileSize == fileSize && existing.FileModifiedAt.Equal(fileModTime) {
@@ -225,7 +247,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 
 			// File changed or refresh requested: re-extract metadata and update
 			if isVideo {
-				vMeta, vErr := s.inspectVideo(ctx, relPath)
+				vMeta, vErr := s.inspectVideo(scanCtx, relPath)
 				if vErr != nil {
 					failed++
 					if len(errList) < 50 {
@@ -257,7 +279,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 				}
 				existing.UpdatedAt = time.Now().UTC()
 
-				if err := s.photoRepo.Update(ctx, existing); err != nil {
+				if err := s.photoRepo.Update(scanCtx, existing); err != nil {
 					failed++
 				} else {
 					updated++
@@ -285,7 +307,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 			existing.TakenAt = meta.TakenAt
 			existing.UpdatedAt = time.Now().UTC()
 
-			if err := s.photoRepo.Update(ctx, existing); err != nil {
+			if err := s.photoRepo.Update(scanCtx, existing); err != nil {
 				failed++
 			} else {
 				updated++
@@ -295,7 +317,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 
 		// New media record: extract metadata
 		if isVideo {
-			vMeta, vErr := s.inspectVideo(ctx, relPath)
+			vMeta, vErr := s.inspectVideo(scanCtx, relPath)
 			if vErr != nil {
 				failed++
 				if len(errList) < 50 {
@@ -347,7 +369,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 				UpdatedAt:        time.Now().UTC(),
 			}
 
-			if err := s.photoRepo.Create(ctx, newMedia); err != nil {
+			if err := s.photoRepo.Create(scanCtx, newMedia); err != nil {
 				failed++
 				if len(errList) < 50 {
 					errList = append(errList, fmt.Sprintf("failed to index video %s: %v", relPath, err))
@@ -389,7 +411,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 			UpdatedAt:        time.Now().UTC(),
 		}
 
-		if err := s.photoRepo.Create(ctx, newPhoto); err != nil {
+		if err := s.photoRepo.Create(scanCtx, newPhoto); err != nil {
 			failed++
 			if len(errList) < 50 {
 				errList = append(errList, fmt.Sprintf("failed to index %s: %v", relPath, err))
@@ -412,9 +434,13 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 	s.status.FinishedAt = &now
 	s.status.DurationMs = time.Since(startTime).Milliseconds()
 
-	if walkErr != nil && !errors.Is(walkErr, context.Canceled) {
-		s.status.Status = "failed"
-		s.status.Errors = append(s.status.Errors, walkErr.Error())
+	if walkErr != nil {
+		if errors.Is(walkErr, context.Canceled) {
+			s.status.Status = "canceled"
+		} else {
+			s.status.Status = "failed"
+			s.status.Errors = append(s.status.Errors, walkErr.Error())
+		}
 	} else {
 		s.status.Status = "completed"
 	}

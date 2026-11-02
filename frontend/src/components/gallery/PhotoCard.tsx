@@ -12,7 +12,7 @@ interface PhotoCardProps {
   removeLabel?: string
 }
 
-export function PhotoCard({
+export const PhotoCard: React.FC<PhotoCardProps> = React.memo(function PhotoCard({
   photo,
   onSelect,
   viewMode = 'grid',
@@ -244,4 +244,4 @@ export function PhotoCard({
       </div>
     </div>
   )
-}
+})

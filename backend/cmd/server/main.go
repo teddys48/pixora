@@ -85,10 +85,16 @@ func main() {
 	sig := <-quit
 	log.Printf("[INFO] Received signal %s. Shutting down gracefully...", sig)
 
-	shutdownTimeout := 5 * time.Second
+	// 1. Cancel any active background scanning tasks
+	mediaScanner.Cancel()
+
+	// 2. Stop accepting new requests and drain in-flight requests
+	shutdownTimeout := 10 * time.Second
 	if err := app.ShutdownWithTimeout(shutdownTimeout); err != nil {
 		log.Printf("[WARN] Server forced shutdown: %v", err)
 	}
+
+	// 3. Database is checkpointed and closed cleanly via defer
 
 	log.Println("[INFO] Pixora server exited properly.")
 }

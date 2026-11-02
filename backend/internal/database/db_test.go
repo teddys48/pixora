@@ -52,14 +52,14 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		t.Fatalf("Expected db file to exist at %s, got: %v", dbPath, err)
 	}
 
-	// Verify schema_migrations has version 1, 2, 3, 4, and 5 recorded
+	// Verify schema_migrations has version 1, 2, 3, 4, 5, and 6 recorded
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4, 5)").Scan(&count)
+	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4, 5, 6)").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to query schema_migrations: %v", err)
 	}
-	if count != 5 {
-		t.Errorf("Expected migrations 1, 2, 3, 4, and 5 to be recorded, got count %d", count)
+	if count != 6 {
+		t.Errorf("Expected migrations 1 to 6 to be recorded, got count %d", count)
 	}
 
 	// Verify tables exist
@@ -86,6 +86,9 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		"idx_photo_albums_album_id",
 		"idx_photo_albums_photo_id",
 		"idx_photo_albums_album_added",
+		"idx_photos_taken_at_id",
+		"idx_photos_file_modified_at_id",
+		"idx_photos_media_type_taken_at",
 	}
 	for _, idx := range indexes {
 		var name string
@@ -116,6 +119,11 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		if colCount != 1 {
 			t.Errorf("Expected column %q to exist on photos table", col)
 		}
+	}
+
+	// Test WAL checkpoint execution
+	if err := db.Checkpoint("PASSIVE"); err != nil {
+		t.Errorf("Checkpoint failed: %v", err)
 	}
 }
 

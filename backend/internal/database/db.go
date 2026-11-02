@@ -20,7 +20,7 @@ type DB struct {
 
 // Open initializes a SQLite database connection at the specified path.
 // It creates the parent directory if needed, verifies write permissions, sets WAL journal mode,
-// enables foreign keys, configures connection pooling, and applies pending schema migrations.
+// enables foreign keys, configures optimized connection pooling and pragmas, and applies pending schema migrations.
 func Open(dbPath string) (*DB, error) {
 	cleanPath := filepath.Clean(strings.TrimSpace(dbPath))
 	if cleanPath == "" || cleanPath == "." {
@@ -57,9 +57,16 @@ func Open(dbPath string) (*DB, error) {
 
 	var dsn string
 	if isMemory {
-		dsn = "file::memory:?cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+		dsn = "file::memory:?cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)"
 	} else {
-		dsn = fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", cleanPath)
+		// Production SQLite Pragmas:
+		// - WAL journal mode: concurrent readers do not block writers and writer does not block readers
+		// - synchronous=NORMAL: full ACID durability in WAL mode with lower sync latency
+		// - busy_timeout=10000: wait up to 10s on locked database before throwing busy error
+		// - cache_size=-64000: 64MB memory page cache for fast index traversal
+		// - temp_store=2 (MEMORY): avoid temporary disk files for sorting and subqueries
+		// - mmap_size=268435456 (256MB): memory-mapped file access for fast reads
+		dsn = fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=temp_store(2)&_pragma=mmap_size(268435456)", cleanPath)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -67,10 +74,12 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database at %q: %w", cleanPath, err)
 	}
 
-	// SQLite connection pooling
+	// SQLite connection pooling:
+	// Limit maximum open connections to prevent connection thrashing and lock contention.
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(time.Hour)
+	db.SetConnMaxIdleTime(15 * time.Minute)
 
 	// Explicitly enforce foreign keys
 	if _, err := db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
@@ -95,6 +104,22 @@ func Open(dbPath string) (*DB, error) {
 // Path returns the database file path.
 func (db *DB) Path() string {
 	return db.path
+}
+
+// Checkpoint performs a WAL checkpoint to transfer write-ahead log pages back to the database file.
+func (db *DB) Checkpoint(mode string) error {
+	if mode == "" {
+		mode = "PASSIVE"
+	}
+	_, err := db.Exec(fmt.Sprintf("PRAGMA wal_checkpoint(%s);", mode))
+	return err
+}
+
+// Close cleanly checkpoints WAL and closes the database connection.
+func (db *DB) Close() error {
+	// Best-effort passive checkpoint before closing to flush pages to disk cleanly
+	_ = db.Checkpoint("PASSIVE")
+	return db.DB.Close()
 }
 
 // PingContext checks database connectivity with a timeout.
