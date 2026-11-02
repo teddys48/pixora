@@ -6,6 +6,7 @@ import { FallbackImage } from '@/components/ui/FallbackImage'
 import { Photo } from '@/types/photo'
 import { Folder } from '@/types/folder'
 import { fetchPhotos, addPhotosToAlbum, fetchAlbumPhotoIds } from '@/lib/api'
+import { formatDuration } from '@/lib/utils'
 import {
   Check,
   Search,
@@ -13,6 +14,7 @@ import {
   AlertCircle,
   Loader2,
   Plus,
+  Play,
 } from 'lucide-react'
 
 interface AddPhotosToAlbumModalProps {
@@ -24,6 +26,14 @@ interface AddPhotosToAlbumModalProps {
 }
 
 const PAGE_SIZE = 60
+
+function isVideoPhoto(photo: Photo): boolean {
+  return photo.type === 'video' || Boolean(photo.mediaType?.startsWith('video/'))
+}
+
+function formatMediaCount(count: number, type: 'photo' | 'video'): string {
+  return `${count} ${type}${count === 1 ? '' : 's'}`
+}
 
 export function AddPhotosToAlbumModal({
   isOpen,
@@ -45,6 +55,7 @@ export function AddPhotosToAlbumModal({
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set())
   const [albumPhotoIds, setAlbumPhotoIds] = useState<Set<string>>(new Set(currentPhotoIds))
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
@@ -160,6 +171,7 @@ export function AddPhotosToAlbumModal({
   useEffect(() => {
     if (isOpen) {
       setSelectedIds(new Set())
+      setSelectedVideoIds(new Set())
       setSearchQuery('')
       setDebouncedSearchQuery('')
       setError(null)
@@ -184,14 +196,55 @@ export function AddPhotosToAlbumModal({
     return photos.filter((p) => !isAlreadyInAlbum(p.id))
   }, [photos, isAlreadyInAlbum])
 
-  const toggleSelectPhoto = (photoId: string) => {
-    if (isAlreadyInAlbum(photoId) || isSubmitting) return
+  // Separate selected media so the summary and submit label reflect photos vs videos
+  const selectedCounts = useMemo(() => {
+    const videos = selectedVideoIds.size
+    return {
+      total: selectedIds.size,
+      videos,
+      photos: selectedIds.size - videos,
+    }
+  }, [selectedIds, selectedVideoIds])
+
+  const selectionSummary = useMemo(() => {
+    if (selectedCounts.total === 0) return ''
+    if (selectedCounts.videos === 0) return formatMediaCount(selectedCounts.photos, 'photo')
+    if (selectedCounts.photos === 0) return formatMediaCount(selectedCounts.videos, 'video')
+    return `${formatMediaCount(selectedCounts.photos, 'photo')}, ${formatMediaCount(
+      selectedCounts.videos,
+      'video'
+    )}`
+  }, [selectedCounts])
+
+  const submitLabel = useMemo(() => {
+    if (selectedCounts.total === 0) return 'Add Items'
+    if (selectedCounts.videos === 0) {
+      return `Add ${selectedCounts.photos} Photo${selectedCounts.photos === 1 ? '' : 's'}`
+    }
+    if (selectedCounts.photos === 0) {
+      return `Add ${selectedCounts.videos} Video${selectedCounts.videos === 1 ? '' : 's'}`
+    }
+    return `Add ${selectedCounts.total} Items`
+  }, [selectedCounts])
+
+  const toggleSelectPhoto = (photo: Photo) => {
+    if (isAlreadyInAlbum(photo.id) || isSubmitting) return
+    const wasSelected = selectedIds.has(photo.id)
     setSelectedIds((prev) => {
       const next = new Set(prev)
-      if (next.has(photoId)) {
-        next.delete(photoId)
+      if (next.has(photo.id)) {
+        next.delete(photo.id)
       } else {
-        next.add(photoId)
+        next.add(photo.id)
+      }
+      return next
+    })
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev)
+      if (wasSelected || !isVideoPhoto(photo)) {
+        next.delete(photo.id)
+      } else {
+        next.add(photo.id)
       }
       return next
     })
@@ -203,10 +256,18 @@ export function AddPhotosToAlbumModal({
       availablePhotos.forEach((p) => next.add(p.id))
       return next
     })
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev)
+      availablePhotos.forEach((p) => {
+        if (isVideoPhoto(p)) next.add(p.id)
+      })
+      return next
+    })
   }
 
   const handleDeselectAll = () => {
     setSelectedIds(new Set())
+    setSelectedVideoIds(new Set())
   }
 
   const handleSubmit = async () => {
@@ -225,7 +286,7 @@ export function AddPhotosToAlbumModal({
       onAddSuccess(res.added)
       onClose()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to add photos to album'
+      const msg = err instanceof Error ? err.message : 'Failed to add media to album'
       setError(msg)
     } finally {
       setIsSubmitting(false)
@@ -238,8 +299,8 @@ export function AddPhotosToAlbumModal({
       onClose={() => {
         if (!isSubmitting) onClose()
       }}
-      title={`Add Photos to "${album?.name || 'Album'}"`}
-      description="Choose photos from your library to add to this album. Original files will not be moved or copied."
+      title={`Add Photos & Videos to "${album?.name || 'Album'}"`}
+      description="Choose photos and videos from your library to add to this album. Original files will not be moved or copied."
       maxWidth="xl"
     >
       <div className="space-y-4">
@@ -257,7 +318,7 @@ export function AddPhotosToAlbumModal({
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               type="text"
-              placeholder="Search library photos by filename or title..."
+              placeholder="Search library photos and videos by filename or title..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 h-9 text-xs"
@@ -295,7 +356,7 @@ export function AddPhotosToAlbumModal({
           </div>
         </div>
 
-        {/* Photos Grid with Infinite Scroll */}
+        {/* Media Grid with Infinite Scroll */}
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
@@ -304,15 +365,15 @@ export function AddPhotosToAlbumModal({
           {isLoading ? (
             <div className="flex flex-col items-center justify-center h-64 text-center">
               <Loader2 className="w-6 h-6 animate-spin text-primary mb-2" />
-              <p className="text-xs text-muted-foreground">Loading library photos...</p>
+              <p className="text-xs text-muted-foreground">Loading library media...</p>
             </div>
           ) : photos.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 text-center">
-              <p className="text-sm font-medium text-foreground">No photos found</p>
+              <p className="text-sm font-medium text-foreground">No photos or videos found</p>
               <p className="text-xs text-muted-foreground mt-1 max-w-xs">
                 {debouncedSearchQuery
-                  ? 'No photos matched your search term.'
-                  : 'No indexed photos are available in the gallery. Use the Scan Media or Upload features to add photos.'}
+                  ? 'No photos or videos matched your search term.'
+                  : 'No indexed media is available in the gallery. Use the Scan Media or Upload features to add photos and videos.'}
               </p>
             </div>
           ) : (
@@ -321,12 +382,26 @@ export function AddPhotosToAlbumModal({
                 {photos.map((photo) => {
                   const alreadyIn = isAlreadyInAlbum(photo.id)
                   const isSelected = selectedIds.has(photo.id)
+                  const isVideo = isVideoPhoto(photo)
 
                   return (
                     <div
                       key={photo.id}
-                      onClick={() => toggleSelectPhoto(photo.id)}
-                      className={`group relative aspect-square rounded-lg overflow-hidden border transition-all duration-200 select-none ${
+                      role="button"
+                      tabIndex={alreadyIn ? -1 : 0}
+                      aria-pressed={isSelected}
+                      aria-disabled={alreadyIn || isSubmitting}
+                      aria-label={`${isVideo ? 'Video' : 'Photo'}: ${photo.title}${
+                        alreadyIn ? ' (already in album)' : ''
+                      }`}
+                      onClick={() => toggleSelectPhoto(photo)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          toggleSelectPhoto(photo)
+                        }
+                      }}
+                      className={`group relative aspect-square rounded-lg overflow-hidden border transition-all duration-200 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                         alreadyIn
                           ? 'opacity-60 border-border/50 cursor-not-allowed bg-muted/50'
                           : isSelected
@@ -337,8 +412,21 @@ export function AddPhotosToAlbumModal({
                       <FallbackImage
                         src={photo.thumbnailUrl}
                         alt={photo.title}
+                        isVideo={isVideo}
                         className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                       />
+
+                      {/* Video indicator badge */}
+                      {isVideo && (
+                        <div className="absolute top-1.5 left-1.5 z-10 flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[10px] font-medium font-mono backdrop-blur-sm shadow-sm pointer-events-none">
+                          <Play className="w-2.5 h-2.5 fill-current" />
+                          <span>
+                            {photo.duration && photo.duration > 0
+                              ? formatDuration(photo.duration)
+                              : 'VIDEO'}
+                          </span>
+                        </div>
+                      )}
 
                       {/* Selection Overlay */}
                       {isSelected && (
@@ -373,7 +461,7 @@ export function AddPhotosToAlbumModal({
                 {isLoadingMore ? (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
                     <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                    <span>Loading more photos...</span>
+                    <span>Loading more media...</span>
                   </div>
                 ) : hasMore ? (
                   <Button
@@ -383,11 +471,11 @@ export function AddPhotosToAlbumModal({
                     onClick={loadMorePhotos}
                     className="h-8 text-xs font-normal"
                   >
-                    Load More Photos ({photos.length} of {totalPhotos} loaded)
+                    Load More Items ({photos.length} of {totalPhotos} loaded)
                   </Button>
                 ) : totalPhotos > 0 ? (
                   <p className="text-[11px] text-muted-foreground/70 py-1">
-                    All {totalPhotos} photo{totalPhotos === 1 ? '' : 's'} loaded
+                    All {totalPhotos} item{totalPhotos === 1 ? '' : 's'} loaded
                   </p>
                 ) : null}
               </div>
@@ -398,15 +486,15 @@ export function AddPhotosToAlbumModal({
         {/* Modal Footer */}
         <div className="flex items-center justify-between pt-3 border-t border-border">
           <div className="text-xs text-muted-foreground">
-            {selectedIds.size > 0 ? (
+            {selectedCounts.total > 0 ? (
               <span className="font-medium text-foreground">
-                {selectedIds.size} photo{selectedIds.size === 1 ? '' : 's'} selected
+                {selectionSummary} selected
               </span>
             ) : (
               <span>
                 {totalPhotos > 0
-                  ? `${photos.length} of ${totalPhotos} photos shown`
-                  : 'Select photos to add to this album'}
+                  ? `${photos.length} of ${totalPhotos} items shown`
+                  : 'Select photos or videos to add to this album'}
               </span>
             )}
           </div>
@@ -425,7 +513,7 @@ export function AddPhotosToAlbumModal({
               type="button"
               size="sm"
               onClick={handleSubmit}
-              disabled={selectedIds.size === 0 || isSubmitting}
+              disabled={selectedCounts.total === 0 || isSubmitting}
               className="gap-1.5"
             >
               {isSubmitting ? (
@@ -433,13 +521,7 @@ export function AddPhotosToAlbumModal({
               ) : (
                 <Plus className="w-4 h-4" />
               )}
-              <span>
-                {isSubmitting
-                  ? 'Adding...'
-                  : `Add ${selectedIds.size > 0 ? selectedIds.size : ''} Photo${
-                      selectedIds.size === 1 ? '' : 's'
-                    }`}
-              </span>
+              <span>{isSubmitting ? 'Adding...' : submitLabel}</span>
             </Button>
           </div>
         </div>
