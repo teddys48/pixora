@@ -19,13 +19,21 @@ interface UploadModalProps {
 }
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024 // 25MB
-const ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff']
+const ALLOWED_EXTENSIONS = [
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff',
+  '.mp4', '.webm', '.mov', '.m4v', '.mkv',
+]
 const ALLOWED_MIME_TYPES = [
   'image/jpeg',
   'image/png',
   'image/webp',
   'image/gif',
   'image/tiff',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/x-m4v',
+  'video/x-matroska',
 ]
 
 export function UploadModal({ isOpen, onClose, onUploadSuccess }: UploadModalProps) {
@@ -71,7 +79,7 @@ export function UploadModal({ isOpen, onClose, onUploadSuccess }: UploadModalPro
       if (!isExtValid && !isMimeValid) {
         errors.push({
           filename: file.name,
-          error: 'Unsupported format. Allowed: JPEG, PNG, WebP, GIF, TIFF.',
+          error: 'Unsupported format. Allowed: JPEG, PNG, WebP, GIF, TIFF, MP4, WebM, MOV, M4V, MKV.',
         })
         return
       }
@@ -171,8 +179,8 @@ export function UploadModal({ isOpen, onClose, onUploadSuccess }: UploadModalPro
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
-      title="Upload Photos"
-      description="Add high-resolution photos to your Pixora personal gallery."
+      title="Upload Media"
+      description="Add photos and videos to your Pixora personal gallery."
       maxWidth="md"
     >
       <div className="space-y-4">
@@ -181,7 +189,7 @@ export function UploadModal({ isOpen, onClose, onUploadSuccess }: UploadModalPro
           ref={fileInputRef}
           type="file"
           multiple
-          accept=".jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,image/jpeg,image/png,image/webp,image/gif,image/tiff"
+          accept=".jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.mp4,.webm,.mov,.m4v,.mkv,image/*,video/*"
           className="hidden"
           onChange={handleFileChange}
           disabled={isUploading}
@@ -203,10 +211,10 @@ export function UploadModal({ isOpen, onClose, onUploadSuccess }: UploadModalPro
             <UploadCloud className="w-6 h-6" />
           </div>
           <p className="text-sm font-medium text-foreground mb-1">
-            Drag and drop images here, or browse
+            Drag and drop media files here, or browse
           </p>
           <p className="text-xs text-muted-foreground max-w-xs">
-            Supports JPEG, PNG, WebP, GIF, TIFF up to 25MB each (max 20 per batch).
+            Supports photos and videos (MP4, WebM, MOV, M4V, MKV) up to 25MB each (max 20 per batch).
           </p>
         </div>
 

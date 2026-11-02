@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,8 +9,11 @@ import (
 	"image/jpeg"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/image/draw"
@@ -26,25 +30,28 @@ const (
 	ThumbnailQuality = 85
 )
 
-// ThumbnailService generates, caches, and serves thumbnails.
+// ThumbnailService generates, caches, and serves thumbnails for photos and videos.
 type ThumbnailService struct {
-	storage *storage.Storage
-	locks   sync.Map // photoID -> *sync.Mutex
+	storage   *storage.Storage
+	locks     sync.Map      // photoID -> *sync.Mutex
+	ffmpegSem chan struct{} // Concurrency limiter for ffmpeg
+	failedIDs sync.Map      // photoID -> time.Time
 }
 
 // NewThumbnailService creates a new ThumbnailService.
 func NewThumbnailService(storage *storage.Storage) *ThumbnailService {
 	return &ThumbnailService{
-		storage: storage,
+		storage:   storage,
+		ffmpegSem: make(chan struct{}, 3), // max 3 concurrent ffmpeg tasks
 	}
 }
 
-// ThumbnailRelativePath returns the deterministic relative path for a photo's thumbnail.
+// ThumbnailRelativePath returns the deterministic relative path for a media thumbnail.
 func (s *ThumbnailService) ThumbnailRelativePath(photoID string) string {
 	return filepath.Join("thumbnails", fmt.Sprintf("%s.jpg", photoID))
 }
 
-// GetOrGenerate returns the absolute path to the thumbnail for the given photo,
+// GetOrGenerate returns the absolute path to the thumbnail for the given photo or video,
 // generating it if it does not yet exist.
 func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (string, error) {
 	if s.storage == nil {
@@ -62,7 +69,14 @@ func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (
 		return resolvedThumb, nil
 	}
 
-	// 2. Obtain lock for this photo ID to avoid duplicate concurrent generation
+	// 2. Check if thumbnail generation previously failed recently (cooldown to avoid CPU thrashing)
+	if failVal, ok := s.failedIDs.Load(p.ID); ok {
+		if failTime, ok := failVal.(time.Time); ok && time.Since(failTime) < 3*time.Minute {
+			return "", errors.New("thumbnail generation previously failed; cooling down")
+		}
+	}
+
+	// 3. Obtain lock for this photo ID to avoid duplicate concurrent generation
 	lockVal, _ := s.locks.LoadOrStore(p.ID, &sync.Mutex{})
 	mu := lockVal.(*sync.Mutex)
 	mu.Lock()
@@ -73,24 +87,108 @@ func (s *ThumbnailService) GetOrGenerate(ctx context.Context, p *models.Photo) (
 		return resolvedThumb, nil
 	}
 
-	// 3. Verify write access
+	// 4. Verify write access
 	if err := s.storage.CheckWriteAccess(); err != nil {
 		return "", fmt.Errorf("%w: cannot generate thumbnail in read-only storage", storage.ErrReadOnly)
 	}
 
-	// 4. Open original file
+	resolvedOrig, err := s.storage.ResolvePath(p.RelativePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve original media: %w", err)
+	}
+
+	isVideo := strings.HasPrefix(p.MediaType, "video/") || IsSupportedVideoExtension(p.OriginalFilename)
+
+	if isVideo {
+		if err := s.generateVideoThumbnail(ctx, resolvedOrig, resolvedThumb, p.Duration); err != nil {
+			s.failedIDs.Store(p.ID, time.Now().UTC())
+			return "", err
+		}
+		s.failedIDs.Delete(p.ID)
+		return resolvedThumb, nil
+	}
+
+	// 5. Open original image file
 	f, err := s.storage.OpenFile(p.RelativePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open original photo: %w", err)
 	}
 	defer f.Close()
 
-	// 5. Generate thumbnail to disk
+	// 6. Generate image thumbnail to disk
 	if err := s.generateThumbnail(f, resolvedThumb); err != nil {
+		s.failedIDs.Store(p.ID, time.Now().UTC())
 		return "", err
 	}
+	s.failedIDs.Delete(p.ID)
 
 	return resolvedThumb, nil
+}
+
+// generateVideoThumbnail extracts a representative video frame using ffmpeg and scales to thumbnail dimensions.
+func (s *ThumbnailService) generateVideoThumbnail(ctx context.Context, inputPath, targetPath string, duration *float64) error {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	// Limit concurrent ffmpeg processes
+	select {
+	case s.ffmpegSem <- struct{}{}:
+		defer func() { <-s.ffmpegSem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	destDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create thumbnail directory: %w", err)
+	}
+
+	tmpPath := filepath.Join(destDir, fmt.Sprintf(".thumb_%s.tmp.jpg", uuid.New().String()))
+	defer os.Remove(tmpPath)
+
+	seekTime := "00:00:01"
+	if duration != nil && *duration < 1.5 {
+		seekTime = "00:00:00"
+	}
+
+	runFFmpeg := func(st string) error {
+		cmdCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(cmdCtx, ffmpegPath,
+			"-y",
+			"-ss", st,
+			"-i", inputPath,
+			"-vframes", "1",
+			"-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", DefaultThumbnailSize, DefaultThumbnailSize),
+			"-q:v", "2",
+			tmpPath,
+		)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		return cmd.Run()
+	}
+
+	err = runFFmpeg(seekTime)
+	if err != nil && seekTime != "00:00:00" {
+		err = runFFmpeg("00:00:00")
+	}
+	if err != nil {
+		return fmt.Errorf("ffmpeg thumbnail generation failed: %w", err)
+	}
+
+	info, err := os.Stat(tmpPath)
+	if err != nil || info.Size() == 0 {
+		return errors.New("ffmpeg generated empty thumbnail")
+	}
+
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return fmt.Errorf("failed to commit video thumbnail file: %w", err)
+	}
+
+	return nil
 }
 
 // generateThumbnail decodes the source image, applies EXIF orientation, scales it preserving aspect ratio, and writes JPEG to targetPath.

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { Photo } from '@/types/photo'
-import { formatDate, formatBytes } from '@/lib/utils'
+import { formatDate, formatBytes, formatDuration } from '@/lib/utils'
 import {
   X,
   ChevronLeft,
@@ -19,6 +19,10 @@ import {
   Folder as FolderIcon,
   Loader2,
   Clock,
+  Film,
+  Play,
+  Download,
+  AlertCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -43,12 +47,16 @@ export function LightboxModal({
   onLoadMore,
   isLoadingMore = false,
 }: LightboxModalProps) {
+  const isVideo = photo?.type === 'video' || Boolean(photo?.mediaType?.startsWith('video/'))
+
   const [showInfo, setShowInfo] = useState(false)
   const [zoomScale, setZoomScale] = useState(1)
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
   const [isPanning, setIsPanning] = useState(false)
   const [isImgLoading, setIsImgLoading] = useState(true)
   const [imgHasError, setImgHasError] = useState(false)
+  const [isVideoLoading, setIsVideoLoading] = useState(true)
+  const [videoHasError, setVideoHasError] = useState(false)
 
   const panStartRef = useRef({ x: 0, y: 0 })
   const currentOffsetRef = useRef({ x: 0, y: 0 })
@@ -59,7 +67,7 @@ export function LightboxModal({
 
   const pendingNextRef = useRef(false)
 
-  // Reset zoom & pan when switching photos or closing
+  // Reset zoom & pan when switching media or closing
   const resetZoom = useCallback(() => {
     setZoomScale(1)
     setPanOffset({ x: 0, y: 0 })
@@ -70,6 +78,8 @@ export function LightboxModal({
     resetZoom()
     setIsImgLoading(true)
     setImgHasError(false)
+    setIsVideoLoading(true)
+    setVideoHasError(false)
   }, [photo?.id, resetZoom])
 
   // Speculatively load next page when approaching end of collection
@@ -113,10 +123,12 @@ export function LightboxModal({
   }, [onClose, photo?.id])
 
   const handleZoomIn = useCallback(() => {
+    if (isVideo) return
     setZoomScale((prev) => Math.min(prev + 0.5, 4))
-  }, [])
+  }, [isVideo])
 
   const handleZoomOut = useCallback(() => {
+    if (isVideo) return
     setZoomScale((prev) => {
       const next = Math.max(prev - 0.5, 1)
       if (next === 1) {
@@ -125,18 +137,18 @@ export function LightboxModal({
       }
       return next
     })
-  }, [])
+  }, [isVideo])
 
-  // Fit to width: set zoom scale to 1.5 as comfortable reading/width fit
   const handleFitToWidth = useCallback(() => {
+    if (isVideo) return
     setZoomScale(1.75)
     setPanOffset({ x: 0, y: 0 })
     currentOffsetRef.current = { x: 0, y: 0 }
-  }, [])
+  }, [isVideo])
 
-  // Mouse pan handlers
+  // Mouse pan handlers (for images)
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (zoomScale <= 1) return
+    if (isVideo || zoomScale <= 1) return
     setIsPanning(true)
     panStartRef.current = {
       x: e.clientX - panOffset.x,
@@ -145,7 +157,7 @@ export function LightboxModal({
   }
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isPanning || zoomScale <= 1) return
+    if (isVideo || !isPanning || zoomScale <= 1) return
     const newX = e.clientX - panStartRef.current.x
     const newY = e.clientY - panStartRef.current.y
     setPanOffset({ x: newX, y: newY })
@@ -153,12 +165,13 @@ export function LightboxModal({
   }
 
   const handleMouseUp = () => {
+    if (isVideo) return
     setIsPanning(false)
   }
 
   // Touch pan handlers
   const handleTouchStart = (e: React.TouchEvent) => {
-    if (zoomScale <= 1 || e.touches.length !== 1) return
+    if (isVideo || zoomScale <= 1 || e.touches.length !== 1) return
     setIsPanning(true)
     panStartRef.current = {
       x: e.touches[0].clientX - panOffset.x,
@@ -167,7 +180,7 @@ export function LightboxModal({
   }
 
   const handleTouchMove = (e: React.TouchEvent) => {
-    if (!isPanning || zoomScale <= 1 || e.touches.length !== 1) return
+    if (isVideo || !isPanning || zoomScale <= 1 || e.touches.length !== 1) return
     const newX = e.touches[0].clientX - panStartRef.current.x
     const newY = e.touches[0].clientY - panStartRef.current.y
     setPanOffset({ x: newX, y: newY })
@@ -175,6 +188,7 @@ export function LightboxModal({
   }
 
   const handleTouchEnd = () => {
+    if (isVideo) return
     setIsPanning(false)
   }
 
@@ -206,12 +220,14 @@ export function LightboxModal({
         handleNext()
       } else if (e.key.toLowerCase() === 'i') {
         setShowInfo((prev) => !prev)
-      } else if (e.key === '+' || e.key === '=') {
-        handleZoomIn()
-      } else if (e.key === '-' || e.key === '_') {
-        handleZoomOut()
-      } else if (e.key === '0') {
-        resetZoom()
+      } else if (!isVideo) {
+        if (e.key === '+' || e.key === '=') {
+          handleZoomIn()
+        } else if (e.key === '-' || e.key === '_') {
+          handleZoomOut()
+        } else if (e.key === '0') {
+          resetZoom()
+        }
       }
     }
 
@@ -221,7 +237,7 @@ export function LightboxModal({
       document.body.style.overflow = originalOverflow
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [isOpen, handleClose, handlePrev, handleNext, handleZoomIn, handleZoomOut, resetZoom])
+  }, [isOpen, isVideo, handleClose, handlePrev, handleNext, handleZoomIn, handleZoomOut, resetZoom])
 
   if (!isOpen || !photo) return null
 
@@ -229,7 +245,7 @@ export function LightboxModal({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`Photo viewer: ${photo.title}`}
+      aria-label={`${isVideo ? 'Video player' : 'Photo viewer'}: ${photo.title}`}
       className="fixed inset-0 z-50 flex flex-col bg-black/95 text-white backdrop-blur-md select-none"
     >
       {/* Top Header Bar */}
@@ -241,56 +257,77 @@ export function LightboxModal({
           <span className="text-sm font-medium text-neutral-200 truncate max-w-xs md:max-w-md">
             {photo.title}
           </span>
+          {isVideo && (
+            <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-primary/20 text-primary border border-primary/30 shrink-0 flex items-center gap-1">
+              <Film className="w-3 h-3" />
+              <span>Video</span>
+            </span>
+          )}
         </div>
 
         {/* Viewer Action Controls */}
         <div className="flex items-center gap-1 sm:gap-2">
-          {/* Zoom controls */}
-          <div className="flex items-center bg-white/10 rounded-lg p-0.5 border border-white/10">
-            <button
-              onClick={handleZoomOut}
-              disabled={zoomScale <= 1}
-              aria-label="Zoom out (-)"
-              title="Zoom out (-)"
-              className="p-1.5 rounded text-neutral-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-            >
-              <ZoomOut className="h-4 w-4" />
-            </button>
-            <span className="text-[11px] font-mono px-2 text-neutral-300 min-w-[42px] text-center">
-              {Math.round(zoomScale * 100)}%
-            </span>
-            <button
-              onClick={handleZoomIn}
-              disabled={zoomScale >= 4}
-              aria-label="Zoom in (+)"
-              title="Zoom in (+)"
-              className="p-1.5 rounded text-neutral-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-            >
-              <ZoomIn className="h-4 w-4" />
-            </button>
-          </div>
+          {/* Zoom controls (Photos only) */}
+          {!isVideo ? (
+            <>
+              <div className="flex items-center bg-white/10 rounded-lg p-0.5 border border-white/10">
+                <button
+                  onClick={handleZoomOut}
+                  disabled={zoomScale <= 1}
+                  aria-label="Zoom out (-)"
+                  title="Zoom out (-)"
+                  className="p-1.5 rounded text-neutral-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+                >
+                  <ZoomOut className="h-4 w-4" />
+                </button>
+                <span className="text-[11px] font-mono px-2 text-neutral-300 min-w-[42px] text-center">
+                  {Math.round(zoomScale * 100)}%
+                </span>
+                <button
+                  onClick={handleZoomIn}
+                  disabled={zoomScale >= 4}
+                  aria-label="Zoom in (+)"
+                  title="Zoom in (+)"
+                  className="p-1.5 rounded text-neutral-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+                >
+                  <ZoomIn className="h-4 w-4" />
+                </button>
+              </div>
 
-          {/* Reset Zoom / Fit Screen */}
-          {zoomScale > 1 && (
-            <button
-              onClick={resetZoom}
-              aria-label="Fit to screen (0)"
-              title="Fit to screen (0)"
-              className="p-2 rounded-lg text-neutral-300 hover:text-white hover:bg-white/10 transition-colors"
+              {/* Reset Zoom / Fit Screen */}
+              {zoomScale > 1 && (
+                <button
+                  onClick={resetZoom}
+                  aria-label="Fit to screen (0)"
+                  title="Fit to screen (0)"
+                  className="p-2 rounded-lg text-neutral-300 hover:text-white hover:bg-white/10 transition-colors"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                </button>
+              )}
+
+              {/* Fit to width */}
+              <button
+                onClick={zoomScale === 1 ? handleFitToWidth : resetZoom}
+                aria-label={zoomScale === 1 ? 'Fit to width' : 'Fit to screen'}
+                title={zoomScale === 1 ? 'Fit to width' : 'Fit to screen'}
+                className="p-2 rounded-lg text-neutral-300 hover:text-white hover:bg-white/10 transition-colors hidden sm:flex"
+              >
+                <Maximize className="h-4 w-4" />
+              </button>
+            </>
+          ) : (
+            <a
+              href={photo.url}
+              download={photo.filename}
+              aria-label="Download video file"
+              title="Download original video file"
+              className="p-2 rounded-lg text-neutral-300 hover:text-white hover:bg-white/10 transition-colors hidden sm:flex items-center gap-1.5 text-xs"
             >
-              <RotateCcw className="h-4 w-4" />
-            </button>
+              <Download className="h-4 w-4" />
+              <span className="hidden md:inline">Download</span>
+            </a>
           )}
-
-          {/* Fit to width */}
-          <button
-            onClick={zoomScale === 1 ? handleFitToWidth : resetZoom}
-            aria-label={zoomScale === 1 ? 'Fit to width' : 'Fit to screen'}
-            title={zoomScale === 1 ? 'Fit to width' : 'Fit to screen'}
-            className="p-2 rounded-lg text-neutral-300 hover:text-white hover:bg-white/10 transition-colors hidden sm:flex"
-          >
-            <Maximize className="h-4 w-4" />
-          </button>
 
           {/* Info toggle */}
           <button
@@ -324,7 +361,7 @@ export function LightboxModal({
         {hasPrev && (
           <button
             onClick={handlePrev}
-            aria-label="Previous photo"
+            aria-label="Previous media"
             className="absolute left-4 top-1/2 -translate-y-1/2 z-30 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white/80 hover:text-white hover:bg-black/90 backdrop-blur-sm border border-white/10 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
             title="Previous (Arrow Left)"
           >
@@ -336,7 +373,7 @@ export function LightboxModal({
         {hasNext && (
           <button
             onClick={handleNext}
-            aria-label="Next photo"
+            aria-label="Next media"
             className="absolute right-4 top-1/2 -translate-y-1/2 z-30 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white/80 hover:text-white hover:bg-black/90 backdrop-blur-sm border border-white/10 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
             title="Next (Arrow Right)"
           >
@@ -348,11 +385,11 @@ export function LightboxModal({
           </button>
         )}
 
-        {/* Center Image Display Area */}
+        {/* Center Display Area */}
         <div
           className={cn(
             'flex-1 flex items-center justify-center p-2 sm:p-6 md:p-8 overflow-hidden relative',
-            zoomScale > 1
+            !isVideo && zoomScale > 1
               ? isPanning
                 ? 'cursor-grabbing'
                 : 'cursor-grab'
@@ -366,49 +403,107 @@ export function LightboxModal({
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
         >
-          {/* Loading Indicator */}
-          {isImgLoading && !imgHasError && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 z-10 pointer-events-none">
-              <Loader2 className="w-8 h-8 text-white/70 animate-spin" />
-              <span className="text-xs text-white/60 font-medium tracking-wide">
-                Loading original photo...
-              </span>
-            </div>
-          )}
+          {isVideo ? (
+            /* Video Player Area */
+            <div className="relative max-h-full max-w-full flex flex-col items-center justify-center">
+              {isVideoLoading && !videoHasError && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 z-10 pointer-events-none">
+                  <Loader2 className="w-8 h-8 text-white/70 animate-spin" />
+                  <span className="text-xs text-white/60 font-medium tracking-wide">
+                    Initializing video stream...
+                  </span>
+                </div>
+              )}
 
-          {/* Error State */}
-          {imgHasError ? (
-            <div className="flex flex-col items-center justify-center bg-white/5 border border-white/10 text-neutral-300 p-8 text-center rounded-2xl max-w-sm">
-              <ImageOff className="w-12 h-12 mb-3 text-neutral-400 stroke-[1.5]" />
-              <h4 className="text-base font-semibold text-white mb-1">{photo.title}</h4>
-              <p className="text-xs text-neutral-400 mb-4 font-mono break-all">{photo.filename}</p>
-              <span className="text-xs px-2.5 py-1 rounded bg-destructive/20 text-destructive-foreground border border-destructive/30">
-                Failed to load original image file
-              </span>
+              {videoHasError ? (
+                /* Compatibility / Playback Error State */
+                <div className="flex flex-col items-center justify-center bg-white/5 border border-white/10 text-neutral-300 p-8 text-center rounded-2xl max-w-md shadow-2xl">
+                  <AlertCircle className="w-12 h-12 mb-3 text-amber-400 stroke-[1.5]" />
+                  <h4 className="text-base font-semibold text-white mb-1">
+                    Browser playback unavailable
+                  </h4>
+                  <p className="text-xs text-neutral-300 mb-2 leading-relaxed">
+                    Your browser could not play this video. Containers like MKV or codecs like HEVC may require native software support or external playback.
+                  </p>
+                  <p className="text-xs text-neutral-400 mb-5 font-mono break-all">
+                    {photo.filename}
+                    {photo.containerFormat ? ` (${photo.containerFormat})` : ''}
+                  </p>
+                  <a
+                    href={photo.url}
+                    download={photo.filename}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground font-medium text-xs hover:bg-primary/90 transition-colors shadow-sm"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Download Original Video</span>
+                  </a>
+                </div>
+              ) : (
+                <video
+                  key={photo.id}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  autoPlay={false}
+                  onLoadedMetadata={() => setIsVideoLoading(false)}
+                  onCanPlay={() => setIsVideoLoading(false)}
+                  onError={() => {
+                    setIsVideoLoading(false)
+                    setVideoHasError(true)
+                  }}
+                  className="max-h-[82vh] max-w-[88vw] w-auto h-auto rounded-lg shadow-2xl bg-black outline-none"
+                >
+                  <source src={photo.url} type={photo.mediaType || 'video/mp4'} />
+                  Your browser does not support HTML5 video playback.
+                </video>
+              )}
             </div>
           ) : (
-            <div
-              style={{
-                transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomScale})`,
-                transition: isPanning ? 'none' : 'transform 150ms ease-out',
-              }}
-              className="relative max-h-full max-w-full flex items-center justify-center origin-center"
-            >
-              <img
-                src={photo.url}
-                alt={photo.title}
-                draggable={false}
-                onLoad={() => setIsImgLoading(false)}
-                onError={() => {
-                  setIsImgLoading(false)
-                  setImgHasError(true)
-                }}
-                className={cn(
-                  'max-h-[82vh] max-w-[88vw] w-auto h-auto object-contain rounded-lg shadow-2xl transition-opacity duration-200 select-none pointer-events-none',
-                  isImgLoading ? 'opacity-0' : 'opacity-100'
-                )}
-              />
-            </div>
+            /* Photo Image Display Area */
+            <>
+              {isImgLoading && !imgHasError && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 z-10 pointer-events-none">
+                  <Loader2 className="w-8 h-8 text-white/70 animate-spin" />
+                  <span className="text-xs text-white/60 font-medium tracking-wide">
+                    Loading original photo...
+                  </span>
+                </div>
+              )}
+
+              {imgHasError ? (
+                <div className="flex flex-col items-center justify-center bg-white/5 border border-white/10 text-neutral-300 p-8 text-center rounded-2xl max-w-sm">
+                  <ImageOff className="w-12 h-12 mb-3 text-neutral-400 stroke-[1.5]" />
+                  <h4 className="text-base font-semibold text-white mb-1">{photo.title}</h4>
+                  <p className="text-xs text-neutral-400 mb-4 font-mono break-all">{photo.filename}</p>
+                  <span className="text-xs px-2.5 py-1 rounded bg-destructive/20 text-destructive-foreground border border-destructive/30">
+                    Failed to load original image file
+                  </span>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomScale})`,
+                    transition: isPanning ? 'none' : 'transform 150ms ease-out',
+                  }}
+                  className="relative max-h-full max-w-full flex items-center justify-center origin-center"
+                >
+                  <img
+                    src={photo.url}
+                    alt={photo.title}
+                    draggable={false}
+                    onLoad={() => setIsImgLoading(false)}
+                    onError={() => {
+                      setIsImgLoading(false)
+                      setImgHasError(true)
+                    }}
+                    className={cn(
+                      'max-h-[82vh] max-w-[88vw] w-auto h-auto object-contain rounded-lg shadow-2xl transition-opacity duration-200 select-none pointer-events-none',
+                      isImgLoading ? 'opacity-0' : 'opacity-100'
+                    )}
+                  />
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -416,21 +511,49 @@ export function LightboxModal({
         {showInfo && (
           <aside className="w-80 shrink-0 border-l border-white/10 bg-neutral-900/95 backdrop-blur-md p-6 overflow-y-auto space-y-6 hidden md:block animate-in slide-in-from-right-4 duration-200 z-20">
             <div>
-              <h2 className="text-base font-semibold text-white tracking-tight">{photo.title}</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold text-white tracking-tight">{photo.title}</h2>
+              </div>
               <p className="text-xs text-neutral-400 font-mono mt-1 break-all">{photo.filename}</p>
             </div>
 
-            {/* Photo Details List */}
+            {/* Media Details List */}
             <div className="space-y-4 text-xs">
-              {/* Capture Date & Time */}
+              {/* Media Type */}
+              <div className="flex items-start gap-3">
+                <Film className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-neutral-400 font-medium">Media Type</p>
+                  <p className="text-neutral-200 mt-0.5 uppercase">
+                    {isVideo ? 'Video' : 'Photo'} {photo.mediaType ? `(${photo.mediaType})` : ''}
+                  </p>
+                </div>
+              </div>
+
+              {/* Video Duration (when applicable) */}
+              {isVideo && photo.duration !== undefined && photo.duration > 0 && (
+                <div className="flex items-start gap-3">
+                  <Play className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5 fill-current" />
+                  <div>
+                    <p className="text-neutral-400 font-medium">Duration</p>
+                    <p className="text-neutral-200 font-mono mt-0.5">
+                      {formatDuration(photo.duration)} ({Math.round(photo.duration * 10) / 10}s)
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Capture / Creation Date */}
               <div className="flex items-start gap-3">
                 <Calendar className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
                 <div>
                   <div className="flex items-center gap-1.5">
-                    <p className="text-neutral-400 font-medium">Capture Date</p>
+                    <p className="text-neutral-400 font-medium">
+                      {isVideo ? 'Creation Date' : 'Capture Date'}
+                    </p>
                     {photo.takenAt ? (
                       <span className="text-[10px] px-1.5 py-0.2 rounded bg-primary/20 text-primary border border-primary/30">
-                        EXIF
+                        {isVideo ? 'Video' : 'EXIF'}
                       </span>
                     ) : (
                       <span className="text-[10px] px-1.5 py-0.2 rounded bg-muted/30 text-neutral-400">
@@ -470,7 +593,7 @@ export function LightboxModal({
                 </div>
               </div>
 
-              {/* Dimensions */}
+              {/* Dimensions / Resolution */}
               <div className="flex items-start gap-3">
                 <Maximize className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
                 <div>
@@ -492,8 +615,47 @@ export function LightboxModal({
                 </div>
               </div>
 
-              {/* Camera & Lens */}
-              {(photo.metadata.camera || photo.metadata.lens) && (
+              {/* Video Codec Details */}
+              {isVideo && (photo.videoCodec || photo.audioCodec || photo.containerFormat) && (
+                <div className="space-y-3 pt-2 border-t border-white/10">
+                  {photo.videoCodec && (
+                    <div className="flex items-start gap-3">
+                      <Film className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-neutral-400 font-medium">Video Codec</p>
+                        <p className="text-neutral-200 font-mono uppercase mt-0.5">
+                          {photo.videoCodec}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {photo.audioCodec && (
+                    <div className="flex items-start gap-3">
+                      <Film className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-neutral-400 font-medium">Audio Codec</p>
+                        <p className="text-neutral-200 font-mono uppercase mt-0.5">
+                          {photo.audioCodec}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {photo.containerFormat && (
+                    <div className="flex items-start gap-3">
+                      <Film className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-neutral-400 font-medium">Container Format</p>
+                        <p className="text-neutral-200 font-mono mt-0.5 truncate max-w-[180px]" title={photo.containerFormat}>
+                          {photo.containerFormat}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Camera & Lens (Photo EXIF) */}
+              {!isVideo && (photo.metadata.camera || photo.metadata.lens) && (
                 <div className="flex items-start gap-3 pt-2 border-t border-white/10">
                   <Camera className="w-4 h-4 text-neutral-400 shrink-0 mt-0.5" />
                   <div>
@@ -508,8 +670,8 @@ export function LightboxModal({
                 </div>
               )}
 
-              {/* Exposure Settings */}
-              {(photo.metadata.aperture ||
+              {/* Exposure Settings (Photo EXIF) */}
+              {!isVideo && (photo.metadata.aperture ||
                 photo.metadata.shutterSpeed ||
                 photo.metadata.iso ||
                 photo.metadata.focalLength) && (
@@ -577,6 +739,12 @@ export function LightboxModal({
             <span className="font-mono text-[11px] text-neutral-400">{formatBytes(photo.size)}</span>
           </div>
           <div className="flex items-center gap-3 text-[11px] text-neutral-400">
+            {isVideo && photo.duration !== undefined && photo.duration > 0 && (
+              <>
+                <span className="text-primary font-mono">{formatDuration(photo.duration)}</span>
+                <span>•</span>
+              </>
+            )}
             <span>
               {photo.takenAt ? formatDate(photo.takenAt) : photo.fileModifiedAt ? 'Modified: ' + formatDate(photo.fileModifiedAt) : 'Undated'}
             </span>
@@ -595,6 +763,18 @@ export function LightboxModal({
             <div className="text-[11px] text-neutral-400 flex items-center gap-1.5">
               <Camera className="w-3.5 h-3.5 shrink-0" />
               <span>{photo.metadata.camera}</span>
+            </div>
+          )}
+          {isVideo && (
+            <div className="pt-1">
+              <a
+                href={photo.url}
+                download={photo.filename}
+                className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download file</span>
+              </a>
             </div>
           )}
         </div>

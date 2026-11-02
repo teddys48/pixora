@@ -51,7 +51,7 @@ func (r *SQLiteAlbumRepository) Create(ctx context.Context, a *models.Album) err
 	_, err := r.db.ExecContext(ctx, query, a.ID, a.Name, a.Description, a.CreatedAt, a.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "unique") {
-			return fmt.Errorf("%w: album with name %q or id %q already exists", ErrConflict, a.Name, a.ID)
+			return fmt.Errorf("%w: album with name %q already exists", ErrConflict, a.Name)
 		}
 		return fmt.Errorf("failed to insert album: %w", err)
 	}
@@ -59,19 +59,29 @@ func (r *SQLiteAlbumRepository) Create(ctx context.Context, a *models.Album) err
 	return nil
 }
 
-// GetByID retrieves an album by its ID along with its current photo count and cover thumbnail.
+// GetByID retrieves an album by its ID, with accurate photoCount, coverPhotoId, and coverThumbnailUrl.
 func (r *SQLiteAlbumRepository) GetByID(ctx context.Context, id string) (*models.Album, error) {
 	query := `
 SELECT a.id, a.name, a.description, a.created_at, a.updated_at,
-       (SELECT COUNT(*) FROM photo_albums pa WHERE pa.album_id = a.id) AS photo_count,
-       (SELECT pa.photo_id FROM photo_albums pa WHERE pa.album_id = a.id ORDER BY pa.added_at DESC, pa.photo_id ASC LIMIT 1) AS cover_photo_id
+       COUNT(pa.photo_id) AS photo_count,
+       (
+           SELECT p.id
+           FROM photos p
+           INNER JOIN photo_albums pa2 ON pa2.photo_id = p.id
+           WHERE pa2.album_id = a.id
+           ORDER BY pa2.added_at DESC, p.id ASC
+           LIMIT 1
+       ) AS cover_photo_id
 FROM albums a
-WHERE a.id = ?`
+LEFT JOIN photo_albums pa ON pa.album_id = a.id
+WHERE a.id = ?
+GROUP BY a.id`
 
 	var a models.Album
 	var coverPhotoID sql.NullString
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
-		&a.ID, &a.Name, &a.Description, &a.CreatedAt, &a.UpdatedAt, &a.PhotoCount, &coverPhotoID,
+		&a.ID, &a.Name, &a.Description, &a.CreatedAt, &a.UpdatedAt,
+		&a.PhotoCount, &coverPhotoID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -81,23 +91,32 @@ WHERE a.id = ?`
 	}
 
 	if coverPhotoID.Valid && coverPhotoID.String != "" {
-		photoID := coverPhotoID.String
-		a.CoverPhotoID = &photoID
-		thumbURL := fmt.Sprintf("/api/photos/%s/thumbnail", photoID)
+		cID := coverPhotoID.String
+		a.CoverPhotoID = &cID
+		thumbURL := fmt.Sprintf("/api/photos/%s/thumbnail", cID)
 		a.CoverThumbnailURL = &thumbURL
 	}
 
 	return &a, nil
 }
 
-// List returns all albums with their respective photo counts and cover thumbnails.
+// List returns all albums ordered alphabetically by name (case-insensitive) with accurate photo count and cover thumbnail.
 func (r *SQLiteAlbumRepository) List(ctx context.Context) ([]models.Album, error) {
 	query := `
 SELECT a.id, a.name, a.description, a.created_at, a.updated_at,
-       (SELECT COUNT(*) FROM photo_albums pa WHERE pa.album_id = a.id) AS photo_count,
-       (SELECT pa.photo_id FROM photo_albums pa WHERE pa.album_id = a.id ORDER BY pa.added_at DESC, pa.photo_id ASC LIMIT 1) AS cover_photo_id
+       COUNT(pa.photo_id) AS photo_count,
+       (
+           SELECT p.id
+           FROM photos p
+           INNER JOIN photo_albums pa2 ON pa2.photo_id = p.id
+           WHERE pa2.album_id = a.id
+           ORDER BY pa2.added_at DESC, p.id ASC
+           LIMIT 1
+       ) AS cover_photo_id
 FROM albums a
-ORDER BY a.name COLLATE NOCASE ASC, a.id ASC`
+LEFT JOIN photo_albums pa ON pa.album_id = a.id
+GROUP BY a.id
+ORDER BY a.name COLLATE NOCASE ASC, a.created_at DESC`
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
@@ -110,29 +129,29 @@ ORDER BY a.name COLLATE NOCASE ASC, a.id ASC`
 		var a models.Album
 		var coverPhotoID sql.NullString
 		if err := rows.Scan(
-			&a.ID, &a.Name, &a.Description, &a.CreatedAt, &a.UpdatedAt, &a.PhotoCount, &coverPhotoID,
+			&a.ID, &a.Name, &a.Description, &a.CreatedAt, &a.UpdatedAt,
+			&a.PhotoCount, &coverPhotoID,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan album: %w", err)
 		}
 		if coverPhotoID.Valid && coverPhotoID.String != "" {
-			photoID := coverPhotoID.String
-			a.CoverPhotoID = &photoID
-			thumbURL := fmt.Sprintf("/api/photos/%s/thumbnail", photoID)
+			cID := coverPhotoID.String
+			a.CoverPhotoID = &cID
+			thumbURL := fmt.Sprintf("/api/photos/%s/thumbnail", cID)
 			a.CoverThumbnailURL = &thumbURL
 		}
 		albums = append(albums, a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error during album iteration: %w", err)
+		return nil, fmt.Errorf("error during albums iteration: %w", err)
 	}
 
 	return albums, nil
 }
 
-// Update modifies an album's name, description, and updated_at timestamp.
+// Update updates an album's name and description.
 func (r *SQLiteAlbumRepository) Update(ctx context.Context, a *models.Album) error {
-	now := time.Now().UTC()
-	a.UpdatedAt = now
+	a.UpdatedAt = time.Now().UTC()
 
 	query := `UPDATE albums SET name = ?, description = ?, updated_at = ? WHERE id = ?`
 	res, err := r.db.ExecContext(ctx, query, a.Name, a.Description, a.UpdatedAt, a.ID)
@@ -142,180 +161,152 @@ func (r *SQLiteAlbumRepository) Update(ctx context.Context, a *models.Album) err
 		}
 		return fmt.Errorf("failed to update album: %w", err)
 	}
-
-	affected, err := res.RowsAffected()
+	rows, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
-	if affected == 0 {
+	if rows == 0 {
 		return ErrNotFound
 	}
 
 	return nil
 }
 
-// Delete removes an album by ID. Photo associations in photo_albums cascade-delete automatically.
+// Delete removes an album record by ID.
 func (r *SQLiteAlbumRepository) Delete(ctx context.Context, id string) error {
 	query := `DELETE FROM albums WHERE id = ?`
 	res, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete album: %w", err)
 	}
-
-	affected, err := res.RowsAffected()
+	rows, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
-	if affected == 0 {
+	if rows == 0 {
 		return ErrNotFound
 	}
 
 	return nil
 }
 
-// AddPhoto associates a photo with an album and updates the album's updated_at timestamp.
+// AddPhoto associates a photo with an album.
 func (r *SQLiteAlbumRepository) AddPhoto(ctx context.Context, photoID, albumID string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+	var dummy string
+	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("failed to verify album existence: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+
+	if err := r.db.QueryRowContext(ctx, "SELECT id FROM photos WHERE id = ?", photoID).Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("failed to verify photo existence: %w", err)
+	}
 
 	now := time.Now().UTC()
-	query := `INSERT OR IGNORE INTO photo_albums (photo_id, album_id, added_at) VALUES (?, ?, ?)`
-	_, err = tx.ExecContext(ctx, query, photoID, albumID, now)
+	query := `
+INSERT INTO photo_albums (photo_id, album_id, added_at)
+VALUES (?, ?, ?)
+ON CONFLICT(photo_id, album_id) DO NOTHING`
+
+	_, err := r.db.ExecContext(ctx, query, photoID, albumID, now)
 	if err != nil {
-		return fmt.Errorf("failed to associate photo with album: %w", err)
+		return fmt.Errorf("failed to add photo to album: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, "UPDATE albums SET updated_at = ? WHERE id = ?", now, albumID)
-	if err != nil {
-		return fmt.Errorf("failed to update album timestamp: %w", err)
-	}
-
-	return tx.Commit()
+	return nil
 }
 
-// AddPhotos associates multiple photos with an album inside a single database transaction.
-// Duplicate associations are ignored, and nonexistent photos or albums return ErrNotFound.
+// AddPhotos associates multiple photos with an album within a single atomic database transaction.
 func (r *SQLiteAlbumRepository) AddPhotos(ctx context.Context, albumID string, photoIDs []string) (int, error) {
 	if len(photoIDs) == 0 {
 		return 0, nil
+	}
+
+	var dummy string
+	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("failed to verify album existence: %w", err)
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
+	defer tx.Rollback()
 
-	// Verify album exists
-	var dummy string
-	err = tx.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrNotFound
-		}
-		return 0, fmt.Errorf("failed to verify album: %w", err)
-	}
-
-	// Verify each photo exists
-	for _, pid := range photoIDs {
-		err = tx.QueryRowContext(ctx, "SELECT id FROM photos WHERE id = ?", pid).Scan(&dummy)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return 0, fmt.Errorf("%w: photo %q does not exist", ErrNotFound, pid)
-			}
-			return 0, fmt.Errorf("failed to verify photo %q: %w", pid, err)
-		}
-	}
-
-	now := time.Now().UTC()
-	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO photo_albums (photo_id, album_id, added_at) VALUES (?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `
+INSERT INTO photo_albums (photo_id, album_id, added_at)
+VALUES (?, ?, ?)
+ON CONFLICT(photo_id, album_id) DO NOTHING`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to prepare insert statement: %w", err)
 	}
 	defer stmt.Close()
 
+	now := time.Now().UTC()
 	addedCount := 0
-	for _, pid := range photoIDs {
-		res, err := stmt.ExecContext(ctx, pid, albumID, now)
-		if err != nil {
-			return 0, fmt.Errorf("failed to associate photo %q: %w", pid, err)
+
+	for _, pID := range photoIDs {
+		var validID string
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM photos WHERE id = ?", pID).Scan(&validID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, ErrNotFound
+			}
+			return 0, fmt.Errorf("failed to verify photo %s: %w", pID, err)
 		}
-		affected, _ := res.RowsAffected()
-		if affected > 0 {
+
+		res, err := stmt.ExecContext(ctx, pID, albumID, now)
+		if err != nil {
+			return 0, fmt.Errorf("failed to add photo %s to album: %w", pID, err)
+		}
+		if rows, _ := res.RowsAffected(); rows > 0 {
 			addedCount++
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, "UPDATE albums SET updated_at = ? WHERE id = ?", now, albumID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to update album timestamp: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+		return 0, fmt.Errorf("failed to commit add photos transaction: %w", err)
 	}
 
 	return addedCount, nil
 }
 
-// RemovePhoto disassociates a photo from an album and updates the album's updated_at timestamp.
+// RemovePhoto removes a photo association from an album.
 func (r *SQLiteAlbumRepository) RemovePhoto(ctx context.Context, photoID, albumID string) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	// Verify album exists
-	var dummy string
-	if err := tx.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		return fmt.Errorf("failed to verify album: %w", err)
-	}
-
 	query := `DELETE FROM photo_albums WHERE photo_id = ? AND album_id = ?`
-	res, err := tx.ExecContext(ctx, query, photoID, albumID)
+	res, err := r.db.ExecContext(ctx, query, photoID, albumID)
 	if err != nil {
 		return fmt.Errorf("failed to remove photo from album: %w", err)
 	}
-	affected, err := res.RowsAffected()
+	rows, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
-	if affected == 0 {
+	if rows == 0 {
 		return ErrNotFound
 	}
-
-	now := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, "UPDATE albums SET updated_at = ? WHERE id = ?", now, albumID)
-	if err != nil {
-		return fmt.Errorf("failed to update album timestamp: %w", err)
-	}
-
-	return tx.Commit()
+	return nil
 }
 
-// GetPhotos returns paginated photos that belong to an album using offset.
+// GetPhotos returns paginated photos that belong to an album, ordered by added_at DESC.
 func (r *SQLiteAlbumRepository) GetPhotos(ctx context.Context, albumID string, offset, limit int) ([]models.Photo, int, error) {
 	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	if offset < 0 {
 		offset = 0
 	}
 
-	// Verify album exists
 	var dummy string
 	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -332,7 +323,8 @@ func (r *SQLiteAlbumRepository) GetPhotos(ctx context.Context, albumID string, o
 
 	query := `
 SELECT p.id, p.relative_path, p.original_filename, p.media_type, p.file_size,
-       p.width, p.height, p.taken_at, p.file_modified_at, p.created_at, p.updated_at
+       p.width, p.height, p.duration, p.video_codec, p.audio_codec, p.container_format,
+       p.thumbnail_status, p.taken_at, p.file_modified_at, p.created_at, p.updated_at
 FROM photos p
 INNER JOIN photo_albums pa ON pa.photo_id = p.id
 WHERE pa.album_id = ?
@@ -350,7 +342,8 @@ LIMIT ? OFFSET ?`
 		var p models.Photo
 		if err := rows.Scan(
 			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+			&p.Width, &p.Height, &p.Duration, &p.VideoCodec, &p.AudioCodec, &p.ContainerFormat,
+			&p.ThumbnailStatus, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan album photo: %w", err)
 		}
@@ -372,7 +365,6 @@ func (r *SQLiteAlbumRepository) GetPhotosCursor(ctx context.Context, albumID str
 		limit = 200
 	}
 
-	// Verify album exists
 	var dummy string
 	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -398,7 +390,8 @@ func (r *SQLiteAlbumRepository) GetPhotosCursor(ctx context.Context, albumID str
 
 	query := fmt.Sprintf(`
 SELECT p.id, p.relative_path, p.original_filename, p.media_type, p.file_size,
-       p.width, p.height, p.taken_at, p.file_modified_at, p.created_at, p.updated_at,
+       p.width, p.height, p.duration, p.video_codec, p.audio_codec, p.container_format,
+       p.thumbnail_status, p.taken_at, p.file_modified_at, p.created_at, p.updated_at,
        pa.added_at
 FROM photos p
 INNER JOIN photo_albums pa ON pa.photo_id = p.id
@@ -421,7 +414,8 @@ LIMIT ?`, whereClause)
 		var addedAt time.Time
 		if err := rows.Scan(
 			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+			&p.Width, &p.Height, &p.Duration, &p.VideoCodec, &p.AudioCodec, &p.ContainerFormat,
+			&p.ThumbnailStatus, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
 			&addedAt,
 		); err != nil {
 			return nil, 0, false, nil, fmt.Errorf("failed to scan album photo: %w", err)
@@ -454,7 +448,6 @@ LIMIT ?`, whereClause)
 
 // GetPhotoIDs returns all photo IDs associated with the specified album.
 func (r *SQLiteAlbumRepository) GetPhotoIDs(ctx context.Context, albumID string) ([]string, error) {
-	// Verify album exists
 	var dummy string
 	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

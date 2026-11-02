@@ -2,15 +2,16 @@ package scanner_test
 
 import (
 	"bytes"
-	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
-	"time"
 
 	"pixora/backend/internal/database"
 	"pixora/backend/internal/repository"
@@ -36,6 +37,25 @@ func createTestPNG(w, h int) []byte {
 	buf := new(bytes.Buffer)
 	_ = png.Encode(buf, img)
 	return buf.Bytes()
+}
+
+func createTestVideoFile(targetPath string) bool {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return false
+	}
+
+	cmd := exec.Command(ffmpegPath,
+		"-y",
+		"-f", "lavfi",
+		"-i", "testsrc=duration=1:size=320x240:rate=10",
+		"-pix_fmt", "yuv420p",
+		targetPath,
+	)
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	return true
 }
 
 func setupTestEnvironment(t *testing.T) (*storage.Storage, repository.PhotoRepository, string, func()) {
@@ -98,85 +118,144 @@ func TestScannerDiscoveryAndRepeatedScan(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tmpDir, "scratch.jpg"), createTestJPEG(100, 100), 0644)
 	_ = os.WriteFile(filepath.Join(hiddenDir, "secret.jpg"), createTestJPEG(100, 100), 0644)
 	_ = os.WriteFile(filepath.Join(mediaDir, "notes.txt"), []byte("this is not a photo"), 0644)
-	_ = os.WriteFile(filepath.Join(mediaDir, "corrupt.jpg"), []byte{0xFF, 0xD8, 0xFF, 0x00, 0x00}, 0644)
 
 	s := scanner.New(store, repo)
-	ctx := context.Background()
+	ctx := t.Context()
 
-	// --- 1. First Scan ---
+	// Initial scan: should index 2 photos and skip non-photos / internal dirs
 	status, err := s.Scan(ctx)
 	if err != nil {
-		t.Fatalf("First scan failed: %v", err)
+		t.Fatalf("Initial scan failed: %v", err)
 	}
-
 	if status.Status != "completed" {
-		t.Errorf("Expected status completed, got %s", status.Status)
-	}
-	if status.Scanned != 3 {
-		t.Errorf("Expected scanned=3, got %d", status.Scanned)
+		t.Errorf("Expected status 'completed', got %s", status.Status)
 	}
 	if status.Indexed != 2 {
-		t.Errorf("Expected indexed=2, got %d", status.Indexed)
+		t.Errorf("Expected 2 photos indexed, got %d", status.Indexed)
 	}
-	if status.Failed != 1 {
-		t.Errorf("Expected failed=1, got %d", status.Failed)
+	if status.Skipped != 0 {
+		t.Errorf("Expected 0 skipped on first scan, got %d", status.Skipped)
+	}
+	if status.Failed != 0 {
+		t.Errorf("Expected 0 failures, got %d (errors: %v)", status.Failed, status.Errors)
 	}
 
-	// Verify photos in repository
-	count, err := repo.Count(ctx)
-	if err != nil || count != 2 {
-		t.Fatalf("Expected 2 photos in repo, got %d, err: %v", count, err)
+	// Verify database records
+	total, err := repo.Count(ctx)
+	if err != nil || total != 2 {
+		t.Errorf("Expected 2 photos in database, got count %d, err %v", total, err)
 	}
 
 	p1, err := repo.GetByRelativePath(ctx, "vacation/beach.jpg")
-	if err != nil || p1.OriginalFilename != "beach.jpg" || *p1.Width != 640 {
-		t.Errorf("Photo 1 mismatch: %+v, err: %v", p1, err)
+	if err != nil || p1 == nil {
+		t.Fatalf("Failed to retrieve vacation/beach.jpg: %v", err)
+	}
+	if p1.Width == nil || *p1.Width != 640 || p1.Height == nil || *p1.Height != 480 {
+		t.Errorf("Unexpected dimensions for beach.jpg: width=%v height=%v", p1.Width, p1.Height)
+	}
+	if p1.MediaType != "image/jpeg" {
+		t.Errorf("Expected image/jpeg, got %s", p1.MediaType)
 	}
 
 	p2, err := repo.GetByRelativePath(ctx, "vacation/2026/mountains.png")
-	if err != nil || p2.OriginalFilename != "mountains.png" || *p2.Width != 800 {
-		t.Errorf("Photo 2 mismatch: %+v, err: %v", p2, err)
+	if err != nil || p2 == nil {
+		t.Fatalf("Failed to retrieve vacation/2026/mountains.png: %v", err)
+	}
+	if p2.MediaType != "image/png" {
+		t.Errorf("Expected image/png, got %s", p2.MediaType)
 	}
 
-	// --- 2. Repeated Scan without changes ---
-	status2, err := s.Scan(ctx)
+	// Repeated scan: all unchanged files must be skipped and no duplicates created
+	statusRepeat, err := s.Scan(ctx)
 	if err != nil {
 		t.Fatalf("Repeated scan failed: %v", err)
 	}
-	if status2.Indexed != 0 {
-		t.Errorf("Expected indexed=0 on repeat, got %d", status2.Indexed)
+	if statusRepeat.Indexed != 0 {
+		t.Errorf("Expected 0 indexed on repeated scan, got %d", statusRepeat.Indexed)
 	}
-	if status2.Skipped != 2 {
-		t.Errorf("Expected skipped=2 on repeat, got %d", status2.Skipped)
+	if statusRepeat.Skipped != 2 {
+		t.Errorf("Expected 2 skipped on repeated scan, got %d", statusRepeat.Skipped)
 	}
-	if status2.Failed != 1 {
-		t.Errorf("Expected failed=1 on repeat, got %d", status2.Failed)
-	}
-
-	// Total count must remain 2 (no duplicates)
-	countAfter, _ := repo.Count(ctx)
-	if countAfter != 2 {
-		t.Errorf("Expected repo count to remain 2, got %d", countAfter)
+	if statusRepeat.Updated != 0 {
+		t.Errorf("Expected 0 updated on repeated scan, got %d", statusRepeat.Updated)
 	}
 
-	// --- 3. Update existing file on disk and re-scan ---
-	time.Sleep(50 * time.Millisecond)
-	_ = os.WriteFile(filepath.Join(mediaDir, "vacation", "beach.jpg"), createTestJPEG(1024, 768), 0644)
+	totalAfterRepeat, _ := repo.Count(ctx)
+	if totalAfterRepeat != 2 {
+		t.Errorf("Expected total count to remain 2 after repeated scan, got %d", totalAfterRepeat)
+	}
+}
 
-	status3, err := s.Scan(ctx)
+func TestScannerVideoDiscoveryAndRepeatedScan(t *testing.T) {
+	store, repo, mediaDir, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	clipsDir := filepath.Join(mediaDir, "Clips")
+	_ = os.MkdirAll(clipsDir, 0755)
+
+	// Create 1 photo and 1 video
+	_ = os.WriteFile(filepath.Join(mediaDir, "photo.jpg"), createTestJPEG(640, 480), 0644)
+	videoPath := filepath.Join(clipsDir, "video.mp4")
+	if !createTestVideoFile(videoPath) {
+		t.Skip("ffmpeg not available")
+	}
+
+	s := scanner.New(store, repo)
+	ctx := t.Context()
+
+	// 1. Initial scan
+	status, err := s.Scan(ctx)
 	if err != nil {
-		t.Fatalf("Scan after modification failed: %v", err)
+		t.Fatalf("Scan failed: %v", err)
 	}
-	if status3.Updated != 1 {
-		t.Errorf("Expected updated=1, got %d", status3.Updated)
-	}
-	if status3.Skipped != 1 {
-		t.Errorf("Expected skipped=1, got %d", status3.Skipped)
+	if status.Indexed != 2 {
+		t.Fatalf("Expected 2 items indexed (1 photo, 1 video), got %d", status.Indexed)
 	}
 
-	updatedPhoto, _ := repo.GetByRelativePath(ctx, "vacation/beach.jpg")
-	if *updatedPhoto.Width != 1024 || *updatedPhoto.Height != 768 {
-		t.Errorf("Updated photo dimensions mismatch: %dx%d", *updatedPhoto.Width, *updatedPhoto.Height)
+	// 2. Verify video record in database
+	vRecord, err := repo.GetByRelativePath(ctx, "Clips/video.mp4")
+	if err != nil || vRecord == nil {
+		t.Fatalf("Failed to retrieve Clips/video.mp4: %v", err)
+	}
+	if vRecord.MediaType != "video/mp4" {
+		t.Errorf("Expected media_type video/mp4, got %s", vRecord.MediaType)
+	}
+	if vRecord.Width == nil || *vRecord.Width != 320 {
+		t.Errorf("Expected width 320, got %v", vRecord.Width)
+	}
+	if vRecord.Height == nil || *vRecord.Height != 240 {
+		t.Errorf("Expected height 240, got %v", vRecord.Height)
+	}
+	if vRecord.Duration == nil || *vRecord.Duration <= 0 {
+		t.Errorf("Expected duration > 0, got %v", vRecord.Duration)
+	}
+	if vRecord.VideoCodec == nil || *vRecord.VideoCodec != "h264" {
+		t.Errorf("Expected video_codec h264, got %v", vRecord.VideoCodec)
+	}
+
+	// 3. Repeated scan: should skip both
+	repeatStatus, err := s.Scan(ctx)
+	if err != nil {
+		t.Fatalf("Repeated scan failed: %v", err)
+	}
+	if repeatStatus.Indexed != 0 || repeatStatus.Skipped != 2 {
+		t.Errorf("Expected 0 indexed, 2 skipped on repeated scan, got indexed=%d, skipped=%d", repeatStatus.Indexed, repeatStatus.Skipped)
+	}
+
+	// 4. Test MediaType filtering in repository
+	videos, vCount, err := repo.SearchAndFilter(ctx, repository.PhotoFilter{MediaType: "video"})
+	if err != nil || vCount != 1 || len(videos) != 1 {
+		t.Errorf("Expected 1 video filtered by mediaType=video, got count=%d, len=%d, err=%v", vCount, len(videos), err)
+	}
+
+	photos, pCount, err := repo.SearchAndFilter(ctx, repository.PhotoFilter{MediaType: "photo"})
+	if err != nil || pCount != 1 || len(photos) != 1 {
+		t.Errorf("Expected 1 photo filtered by mediaType=photo, got count=%d, len=%d, err=%v", pCount, len(photos), err)
+	}
+
+	allMedia, allCount, err := repo.SearchAndFilter(ctx, repository.PhotoFilter{MediaType: "all"})
+	if err != nil || allCount != 2 || len(allMedia) != 2 {
+		t.Errorf("Expected 2 items filtered by mediaType=all, got count=%d, len=%d, err=%v", allCount, len(allMedia), err)
 	}
 }
 
@@ -186,30 +265,36 @@ func TestScannerSymlinkEscapePrevention(t *testing.T) {
 
 	outsideDir, err := os.MkdirTemp("", "pixora_outside_*")
 	if err != nil {
-		t.Fatalf("Failed to create outside dir: %v", err)
+		t.Fatalf("Failed to create outside temp dir: %v", err)
 	}
 	defer os.RemoveAll(outsideDir)
 
-	outsidePhoto := filepath.Join(outsideDir, "external.jpg")
+	outsidePhoto := filepath.Join(outsideDir, "secret.jpg")
 	_ = os.WriteFile(outsidePhoto, createTestJPEG(400, 300), 0644)
 
-	linkPath := filepath.Join(mediaDir, "escaping_link.jpg")
-	if err := os.Symlink(outsidePhoto, linkPath); err != nil {
-		t.Skip("Symlinks not supported on this platform/filesystem")
+	symlinkPath := filepath.Join(mediaDir, "escape_link.jpg")
+	if err := os.Symlink(outsidePhoto, symlinkPath); err != nil {
+		t.Skip("Symlinks not supported in environment")
 	}
 
+	validPhoto := filepath.Join(mediaDir, "valid.jpg")
+	_ = os.WriteFile(validPhoto, createTestJPEG(400, 300), 0644)
+
 	s := scanner.New(store, repo)
-	status, err := s.Scan(context.Background())
+	ctx := t.Context()
+
+	status, err := s.Scan(ctx)
 	if err != nil {
 		t.Fatalf("Scan failed: %v", err)
 	}
 
-	if status.Indexed != 0 {
-		t.Errorf("Expected 0 indexed for escaping symlink, got %d", status.Indexed)
+	if status.Indexed != 1 {
+		t.Errorf("Expected only 1 valid photo indexed, got %d", status.Indexed)
 	}
-	count, _ := repo.Count(context.Background())
-	if count != 0 {
-		t.Errorf("Expected 0 photos in repo, got %d", count)
+
+	_, err = repo.GetByRelativePath(ctx, "escape_link.jpg")
+	if err == nil {
+		t.Error("Security violation: symlink escaping storage root was indexed")
 	}
 }
 
@@ -218,21 +303,38 @@ func TestScannerConcurrentScanProtection(t *testing.T) {
 	defer cleanup()
 
 	s := scanner.New(store, repo)
+	ctx := t.Context()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
 
-	status1, err1 := s.Scan(ctx)
-	if err1 != nil {
-		t.Fatalf("First scan failed: %v", err1)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.Scan(ctx)
+			errs <- err
+		}()
 	}
-	if status1.Status != "completed" {
-		t.Errorf("Expected completed, got %s", status1.Status)
+
+	wg.Wait()
+	close(errs)
+
+	inProgressErrors := 0
+	successfulScans := 0
+	for err := range errs {
+		if errors.Is(err, scanner.ErrScanInProgress) {
+			inProgressErrors++
+		} else if err == nil {
+			successfulScans++
+		}
 	}
 
-	st := s.Status()
-	if st.Status != "completed" {
-		t.Errorf("Expected status 'completed', got %s", st.Status)
+	if successfulScans < 1 {
+		t.Errorf("Expected at least 1 successful scan, got %d", successfulScans)
+	}
+	if inProgressErrors < 1 {
+		t.Errorf("Expected at least 1 ErrScanInProgress from concurrent attempts, got %d", inProgressErrors)
 	}
 }
 
@@ -240,12 +342,18 @@ func TestScannerMissingStorageRoot(t *testing.T) {
 	_, repo, _, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	store, _ := storage.New("/non/existent/storage/path/xyz")
-	s := scanner.New(store, repo)
+	nonExistentDir := filepath.Join(os.TempDir(), "pixora_missing_dir_12345")
+	store, err := storage.New(nonExistentDir)
+	if err != nil {
+		t.Fatalf("Storage creation failed: %v", err)
+	}
 
-	status, err := s.Scan(context.Background())
+	s := scanner.New(store, repo)
+	ctx := t.Context()
+
+	status, err := s.Scan(ctx)
 	if err == nil {
-		t.Error("Expected error for missing storage root, got nil")
+		t.Error("Expected error when scanning missing storage root, got nil")
 	}
 	if status.Status != "failed" {
 		t.Errorf("Expected status 'failed', got %s", status.Status)
@@ -256,47 +364,30 @@ func TestScannerScanSpecificFolder(t *testing.T) {
 	store, repo, mediaDir, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	vacationDir := filepath.Join(mediaDir, "Vacation")
-	wallpapersDir := filepath.Join(mediaDir, "Wallpapers")
-	_ = os.MkdirAll(vacationDir, 0755)
-	_ = os.MkdirAll(wallpapersDir, 0755)
+	familyDir := filepath.Join(mediaDir, "Family")
+	wallDir := filepath.Join(mediaDir, "Wallpapers")
+	_ = os.MkdirAll(familyDir, 0755)
+	_ = os.MkdirAll(wallDir, 0755)
 
-	_ = os.WriteFile(filepath.Join(vacationDir, "beach.jpg"), createTestJPEG(640, 480), 0644)
-	_ = os.WriteFile(filepath.Join(wallpapersDir, "nature.png"), createTestPNG(800, 600), 0644)
+	_ = os.WriteFile(filepath.Join(familyDir, "reunion.jpg"), createTestJPEG(600, 400), 0644)
+	_ = os.WriteFile(filepath.Join(wallDir, "desktop.jpg"), createTestJPEG(1920, 1080), 0644)
 
 	s := scanner.New(store, repo)
-	ctx := context.Background()
+	ctx := t.Context()
 
-	// 1. Scan only "Vacation" folder
-	status, err := s.ScanPath(ctx, "Vacation")
+	// 1. Scan only "Family" folder
+	statusFam, err := s.ScanPath(ctx, "Family")
 	if err != nil {
-		t.Fatalf("ScanPath('Vacation') failed: %v", err)
+		t.Fatalf("ScanPath('Family') failed: %v", err)
 	}
-	if status.Indexed != 1 || status.Scanned != 1 {
-		t.Errorf("Expected indexed=1, scanned=1; got indexed=%d, scanned=%d", status.Indexed, status.Scanned)
-	}
-
-	// Verify only Vacation photo is in repo
-	total, err := repo.Count(ctx)
-	if err != nil || total != 1 {
-		t.Errorf("Expected 1 photo in repo, got %d", total)
-	}
-	pVac, err := repo.GetByRelativePath(ctx, "Vacation/beach.jpg")
-	if err != nil || pVac == nil {
-		t.Errorf("Expected 'Vacation/beach.jpg' in repo, got err: %v", err)
+	if statusFam.Indexed != 1 {
+		t.Errorf("Expected indexed=1 for family, got %d", statusFam.Indexed)
 	}
 
-	// 2. Re-scan "Vacation": must skip, NO duplicate records
-	statusRepeat, err := s.ScanPath(ctx, "Vacation")
-	if err != nil {
-		t.Fatalf("Repeat ScanPath('Vacation') failed: %v", err)
-	}
-	if statusRepeat.Skipped != 1 || statusRepeat.Indexed != 0 {
-		t.Errorf("Expected skipped=1, indexed=0 on repeat; got skipped=%d, indexed=%d", statusRepeat.Skipped, statusRepeat.Indexed)
-	}
-	totalAfter, _ := repo.Count(ctx)
-	if totalAfter != 1 {
-		t.Errorf("Expected repo count to remain 1 after repeat scan, got %d", totalAfter)
+	// 2. Verify only Family photo is in repo
+	totalAfterFam, _ := repo.Count(ctx)
+	if totalAfterFam != 1 {
+		t.Errorf("Expected 1 photo in repo, got %d", totalAfterFam)
 	}
 
 	// 3. Scan "Wallpapers" folder

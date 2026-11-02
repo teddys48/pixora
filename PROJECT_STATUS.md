@@ -5,8 +5,8 @@
 **Project:** Pixora  
 **Description:** A web-based self-hosted photo gallery for uploading photos, organizing physical folders and virtual albums, searching, filtering, and browsing photos chronologically.
 
-**Current overall status:** Phase 6 — Search, Filtering & Sorting  
-**Current phase:** Phase 6 Completed (Ready for Hardening & Production Deployment)
+**Current overall status:** Phase 7 — Video Support  
+**Current phase:** Phase 7 Completed (Ready for Production Deployment)
 
 ### Product Goals
 
@@ -50,6 +50,7 @@ Authentication and access control must be reconsidered before exposing the appli
 | Database | SQLite via `modernc.org/sqlite` | Implemented | Pure Go (CGO_ENABLED=0), WAL mode, foreign keys, versioned migrations (v1, v2, v3, v4) |
 | Image Processing | Pure-Go decoders & bilinear scaling | Implemented | `image/jpeg`, `image/png`, `image/gif`, `golang.org/x/image/webp`, `golang.org/x/image/tiff`, `golang.org/x/image/draw` |
 | EXIF Parser | `github.com/rwcarlsen/goexif` | Implemented | Pure Go, extracts `DateTimeOriginal`, timestamps, orientation tags (1-8), and camera/lens/exposure details |
+| Video Processing | `ffmpeg` & `ffprobe` + Range Streaming | Implemented | Container & MIME detection (.mp4, .webm, .mov, .m4v, .mkv), ffprobe JSON metadata, ffmpeg thumbnail generation with concurrency limits & cooldown, RFC 7233 byte-range streaming |
 | Photo storage | Local host bind mount (`/media`) | Implemented | Target `STORAGE_ROOT=/media`; safe path traversal checks; read-write mount preserved; read-only folder browsing |
 | Database storage | Separate persistent volume (`/data`) | Implemented | Target `DATABASE_PATH=/data/pixora.db`; parent dir auto-created; never stored in photo dir |
 | Path convention | Relative storage paths in database | Implemented | Relative paths (e.g. `originals/...`, `Pictures/vacation/beach.jpg`); validated with `internal/storage` |

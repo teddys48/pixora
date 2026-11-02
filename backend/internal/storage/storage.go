@@ -83,7 +83,7 @@ func (s *Storage) ValidateRelativePath(relPath string) error {
 // ValidateFolderPath validates a relative folder path.
 // Empty string or "." refers to the storage root and is normalized to "".
 // Returns the canonical forward-slash separated relative path, or an error if invalid/traversal.
-func (s *Storage) ValidateFolderPath(relPath string) (string, error) {
+func ValidateFolderPath(relPath string) (string, error) {
 	trimmed := strings.TrimSpace(relPath)
 	if trimmed == "" || trimmed == "." {
 		return "", nil
@@ -107,6 +107,12 @@ func (s *Storage) ValidateFolderPath(relPath string) (string, error) {
 	canonical = strings.Trim(canonical, "/")
 	return canonical, nil
 }
+
+// ValidateFolderPath validates a relative folder path on the Storage instance.
+func (s *Storage) ValidateFolderPath(relPath string) (string, error) {
+	return ValidateFolderPath(relPath)
+}
+
 
 // ResolvePath securely validates and resolves a relative path under the StorageRoot.
 // It prevents lexical traversal (..) and symlink escapes pointing outside StorageRoot.

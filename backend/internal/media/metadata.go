@@ -10,6 +10,7 @@ import (
 	_ "image/png"
 	"io"
 	"math/big"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -99,22 +100,31 @@ func SniffMediaType(header []byte) (mediaType string, ext string, err error) {
 	return "", "", ErrUnsupportedFormat
 }
 
-// IsSupportedExtension returns whether a file extension matches a supported image format.
-func IsSupportedExtension(filename string) bool {
-	lower := strings.ToLower(filename)
-	ext := ""
-	for i := len(lower) - 1; i >= 0; i-- {
-		if lower[i] == '.' {
-			ext = lower[i:]
-			break
-		}
-	}
+// IsSupportedImageExtension returns whether a file extension matches a supported image format.
+func IsSupportedImageExtension(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
 	switch ext {
 	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff":
 		return true
 	default:
 		return false
 	}
+}
+
+// IsSupportedVideoExtension returns whether a file extension matches a supported video format.
+func IsSupportedVideoExtension(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".mp4", ".webm", ".mov", ".m4v", ".mkv":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSupportedExtension returns whether a file extension matches any supported media format (image or video).
+func IsSupportedExtension(filename string) bool {
+	return IsSupportedImageExtension(filename) || IsSupportedVideoExtension(filename)
 }
 
 // parseExifTimestamp attempts to parse a string representation of an EXIF timestamp.

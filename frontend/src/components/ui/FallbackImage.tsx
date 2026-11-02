@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { ImageOff, Camera } from 'lucide-react'
+import { ImageOff, Camera, Film } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface FallbackImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
@@ -7,6 +7,7 @@ interface FallbackImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
   alt: string
   aspectRatio?: 'video' | 'square' | 'portrait' | 'auto'
   imgClassName?: string
+  isVideo?: boolean
 }
 
 export function FallbackImage({
@@ -15,6 +16,7 @@ export function FallbackImage({
   className,
   imgClassName,
   aspectRatio = 'auto',
+  isVideo = false,
   ...props
 }: FallbackImageProps) {
   const [isLoading, setIsLoading] = useState(true)
@@ -36,9 +38,15 @@ export function FallbackImage({
           className
         )}
       >
-        <ImageOff className="w-8 h-8 mb-2 opacity-50 stroke-[1.5]" />
+        {isVideo ? (
+          <Film className="w-8 h-8 mb-2 opacity-50 stroke-[1.5]" />
+        ) : (
+          <ImageOff className="w-8 h-8 mb-2 opacity-50 stroke-[1.5]" />
+        )}
         <span className="text-xs font-medium max-w-[150px] truncate">{alt}</span>
-        <span className="text-[10px] text-muted-foreground/70 mt-0.5">Image unavailable</span>
+        <span className="text-[10px] text-muted-foreground/70 mt-0.5">
+          {isVideo ? 'Video preview unavailable' : 'Image unavailable'}
+        </span>
       </div>
     )
   }
@@ -54,7 +62,11 @@ export function FallbackImage({
     <div className={cn('relative overflow-hidden bg-muted/30 flex items-center justify-center', aspectClass, className)}>
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-muted/40 animate-pulse">
-          <Camera className="w-6 h-6 text-muted-foreground/30 animate-pulse" />
+          {isVideo ? (
+            <Film className="w-6 h-6 text-muted-foreground/30 animate-pulse" />
+          ) : (
+            <Camera className="w-6 h-6 text-muted-foreground/30 animate-pulse" />
+          )}
         </div>
       )}
       <img

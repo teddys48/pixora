@@ -34,3 +34,18 @@ export function formatYearMonth(dateString?: string): string {
     year: 'numeric',
   }).format(date)
 }
+
+export function formatDuration(seconds?: number): string {
+  if (seconds === undefined || seconds === null || isNaN(seconds) || seconds < 0) {
+    return ""
+  }
+  const totalSeconds = Math.round(seconds)
+  const hrs = Math.floor(totalSeconds / 3600)
+  const mins = Math.floor((totalSeconds % 3600) / 60)
+  const secs = totalSeconds % 60
+
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+  }
+  return `${mins}:${secs.toString().padStart(2, "0")}`
+}

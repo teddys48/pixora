@@ -52,14 +52,14 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		t.Fatalf("Expected db file to exist at %s, got: %v", dbPath, err)
 	}
 
-	// Verify schema_migrations has version 1, 2, 3, and 4 recorded
+	// Verify schema_migrations has version 1, 2, 3, 4, and 5 recorded
 	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4)").Scan(&count)
+	err = db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1, 2, 3, 4, 5)").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to query schema_migrations: %v", err)
 	}
-	if count != 4 {
-		t.Errorf("Expected migrations 1, 2, 3, and 4 to be recorded, got count %d", count)
+	if count != 5 {
+		t.Errorf("Expected migrations 1, 2, 3, 4, and 5 to be recorded, got count %d", count)
 	}
 
 	// Verify tables exist
@@ -92,6 +92,29 @@ func TestDatabaseInitializationAndMigrations(t *testing.T) {
 		err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='index' AND name=?", idx).Scan(&name)
 		if err != nil {
 			t.Errorf("Expected index %q to exist, got error: %v", idx, err)
+		}
+	}
+
+	// Verify video metadata columns exist in photos table
+	columns := []string{"duration", "video_codec", "audio_codec", "container_format", "thumbnail_status"}
+	for _, col := range columns {
+		var colCount int
+		// PRAGMA table_info returns (cid, name, type, notnull, dflt_value, pk)
+		rows, err := db.Query("PRAGMA table_info(photos)")
+		if err != nil {
+			t.Fatalf("Failed to query PRAGMA table_info(photos): %v", err)
+		}
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, ctype string
+			var dflt interface{}
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err == nil && name == col {
+				colCount++
+			}
+		}
+		rows.Close()
+		if colCount != 1 {
+			t.Errorf("Expected column %q to exist on photos table", col)
 		}
 	}
 }
@@ -184,7 +207,8 @@ func TestDatabaseUniqueConstraints(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	db, err := database.Open(filepath.Join(tempDir, "unique_test.db"))
+	dbPath := filepath.Join(tempDir, "unique_test.db")
+	db, err := database.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -241,7 +265,8 @@ func TestDatabasePingAndClose(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	db, err := database.Open(filepath.Join(tempDir, "ping_test.db"))
+	dbPath := filepath.Join(tempDir, "ping_test.db")
+	db, err := database.Open(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}

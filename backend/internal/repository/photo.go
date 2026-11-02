@@ -13,6 +13,20 @@ import (
 	"pixora/backend/internal/models"
 )
 
+const photoSelectColumns = `id, relative_path, original_filename, media_type, file_size,
+       width, height, duration, video_codec, audio_codec, container_format,
+       thumbnail_status, taken_at, file_modified_at, created_at, updated_at`
+
+func scanPhoto(scanner interface{ Scan(...interface{}) error }) (models.Photo, error) {
+	var p models.Photo
+	err := scanner.Scan(
+		&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
+		&p.Width, &p.Height, &p.Duration, &p.VideoCodec, &p.AudioCodec, &p.ContainerFormat,
+		&p.ThumbnailStatus, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
+	)
+	return p, err
+}
+
 // CursorData holds typed values for cursor-based keyset pagination.
 type CursorData struct {
 	ID             string     `json:"id"`
@@ -31,7 +45,7 @@ type PhotoFilter struct {
 	Folder    string     // Relative physical folder path
 	Recursive bool       // Whether to include photos in child subfolders (default true)
 	AlbumID   string     // Virtual album UUID
-	MediaType string     // MIME type (e.g. "image/jpeg") or prefix (e.g. "image/*")
+	MediaType string     // Media type filter ("all", "photo", "video", "image/*", "video/*", or specific MIME type)
 	IsUndated *bool      // If true: taken_at IS NULL; if false: taken_at IS NOT NULL
 	SortBy    string     // "date", "modified", "filename", "size", "created"
 	SortOrder string     // "desc", "asc"
@@ -48,20 +62,21 @@ type PhotoRepository interface {
 	GetByID(ctx context.Context, id string) (*models.Photo, error)
 	GetByRelativePath(ctx context.Context, relPath string) (*models.Photo, error)
 	List(ctx context.Context, offset, limit int, sortBy, order string) ([]models.Photo, int, error)
-	Count(ctx context.Context) (int, error)
+	ListCursor(ctx context.Context, limit int, sortBy, order string, cursor *CursorData) ([]models.Photo, int, bool, *CursorData, error)
 	ListByFolder(ctx context.Context, folderPath string, offset, limit int, sortBy, order string) ([]models.Photo, int, error)
 	ListByFolderCursor(ctx context.Context, folderPath string, limit int, sortBy, order string, cursor *CursorData) ([]models.Photo, int, bool, *CursorData, error)
+	Count(ctx context.Context) (int, error)
 	CountByFolder(ctx context.Context, folderPath string, recursive bool) (int, error)
 	GetFolderCoverPhoto(ctx context.Context, folderPath string) (*models.Photo, error)
 	ListTimeline(ctx context.Context, offset, limit int) ([]models.Photo, int, error)
+	ListTimelineWithFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error)
+	ListTimelineCursor(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, bool, *CursorData, error)
 	GetAdjacentPhotos(ctx context.Context, id string, collectionType string, collectionID string) (prevID *string, nextID *string, err error)
 	SearchAndFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error)
-	SearchAndFilterCursor(ctx context.Context, filter PhotoFilter) (photos []models.Photo, total int, hasMore bool, nextCursor *CursorData, err error)
-	ListTimelineWithFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error)
-	ListTimelineCursor(ctx context.Context, filter PhotoFilter) (photos []models.Photo, total int, hasMore bool, nextCursor *CursorData, err error)
+	SearchAndFilterCursor(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, bool, *CursorData, error)
 }
 
-// SQLitePhotoRepository implements PhotoRepository using SQLite.
+// SQLitePhotoRepository implements PhotoRepository backed by SQLite.
 type SQLitePhotoRepository struct {
 	db *database.DB
 }
@@ -71,14 +86,7 @@ func NewSQLitePhotoRepository(db *database.DB) *SQLitePhotoRepository {
 	return &SQLitePhotoRepository{db: db}
 }
 
-func cleanFolderPath(p string) string {
-	cleaned := strings.Trim(filepath.ToSlash(filepath.Clean(strings.TrimSpace(p))), "/")
-	if cleaned == "." {
-		return ""
-	}
-	return cleaned
-}
-
+// escapeLike escapes special SQL LIKE wildcard characters (_, %, \) so user input is treated as literal.
 func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `%`, `\%`)
@@ -86,29 +94,40 @@ func escapeLike(s string) string {
 	return s
 }
 
+// cleanFolderPath normalizes folder path for storage matching.
+func cleanFolderPath(p string) string {
+	cleaned := filepath.ToSlash(filepath.Clean(p))
+	if cleaned == "." || cleaned == "/" || cleaned == "" {
+		return ""
+	}
+	return strings.Trim(cleaned, "/")
+}
+
+// buildPhotoFilterConditions generates WHERE clauses and query arguments from PhotoFilter.
 func buildPhotoFilterConditions(filter PhotoFilter) (string, []interface{}) {
 	var whereClauses []string
 	var args []interface{}
 
-	// 1. Text search on original_filename or relative_path (case-insensitive substring)
+	// 1. Text Search (q parameter): Case-insensitive match on original_filename OR relative_path
 	q := strings.TrimSpace(filter.Query)
 	if q != "" {
-		escaped := "%" + escapeLike(q) + "%"
+		escaped := escapeLike(q)
+		pattern := "%" + escaped + "%"
 		whereClauses = append(whereClauses, "(original_filename LIKE ? ESCAPE '\\' OR relative_path LIKE ? ESCAPE '\\')")
-		args = append(args, escaped, escaped)
+		args = append(args, pattern, pattern)
 	}
 
-	// 2. Date range filtering on verified capture date (taken_at)
+	// 2. Date Range Filtering: Applies strictly to verified capture date (taken_at)
 	if filter.StartDate != nil {
-		whereClauses = append(whereClauses, "taken_at IS NOT NULL AND taken_at >= ?")
+		whereClauses = append(whereClauses, "taken_at >= ?")
 		args = append(args, filter.StartDate.UTC())
 	}
 	if filter.EndDate != nil {
-		whereClauses = append(whereClauses, "taken_at IS NOT NULL AND taken_at <= ?")
+		whereClauses = append(whereClauses, "taken_at <= ?")
 		args = append(args, filter.EndDate.UTC())
 	}
 
-	// 3. Undated photos filtering
+	// 3. Undated Filter
 	if filter.IsUndated != nil {
 		if *filter.IsUndated {
 			whereClauses = append(whereClauses, "taken_at IS NULL")
@@ -117,14 +136,15 @@ func buildPhotoFilterConditions(filter PhotoFilter) (string, []interface{}) {
 		}
 	}
 
-	// 4. Physical folder filtering
-	folder := cleanFolderPath(filter.Folder)
-	if folder != "" {
-		prefix := folder + "/"
+	// 4. Physical Folder Filtering
+	normFolder := cleanFolderPath(filter.Folder)
+	if normFolder != "" {
 		if filter.Recursive {
+			prefix := normFolder + "/"
 			whereClauses = append(whereClauses, "(relative_path = ? OR SUBSTR(relative_path, 1, ?) = ?)")
-			args = append(args, folder, len(prefix), prefix)
+			args = append(args, normFolder, len(prefix), prefix)
 		} else {
+			prefix := normFolder + "/"
 			whereClauses = append(whereClauses, "SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0")
 			args = append(args, len(prefix), prefix, len(prefix)+1)
 		}
@@ -143,8 +163,13 @@ func buildPhotoFilterConditions(filter PhotoFilter) (string, []interface{}) {
 
 	// 6. Media type filtering
 	mediaType := strings.TrimSpace(filter.MediaType)
-	if mediaType != "" {
-		if strings.HasSuffix(mediaType, "/*") {
+	if mediaType != "" && strings.ToLower(mediaType) != "all" {
+		lower := strings.ToLower(mediaType)
+		if lower == "photo" || lower == "photos" || lower == "image" || lower == "images" || lower == "image/*" {
+			whereClauses = append(whereClauses, "SUBSTR(media_type, 1, 6) = 'image/'")
+		} else if lower == "video" || lower == "videos" || lower == "video/*" {
+			whereClauses = append(whereClauses, "SUBSTR(media_type, 1, 6) = 'video/'")
+		} else if strings.HasSuffix(mediaType, "/*") {
 			prefix := strings.TrimSuffix(mediaType, "/*") + "/"
 			whereClauses = append(whereClauses, "SUBSTR(media_type, 1, ?) = ?")
 			args = append(args, len(prefix), prefix)
@@ -176,50 +201,41 @@ func buildPhotoCursorCondition(sortBy, sortOrder string, cursor *CursorData) (st
 	switch strings.ToLower(sortBy) {
 	case "date", "taken_at", "":
 		if dir == "DESC" {
-			if cursor.TakenAt != nil && !cursor.TakenAt.IsZero() {
-				// Cursor is in dated group
+			if cursor.TakenAt != nil {
 				t := cursor.TakenAt.UTC()
-				var m time.Time
-				if cursor.FileModifiedAt != nil {
-					m = cursor.FileModifiedAt.UTC()
-				}
-				cond := "((taken_at IS NOT NULL AND (taken_at < ? OR (taken_at = ? AND (file_modified_at < ? OR (file_modified_at = ? AND id > ?))))) OR taken_at IS NULL)"
-				args := []interface{}{t, t, m, m, cursor.ID}
-				return cond, args
+				cond := "((taken_at IS NOT NULL AND (taken_at < ? OR (taken_at = ? AND id > ?))) OR taken_at IS NULL)"
+				return cond, []interface{}{t, t, cursor.ID}
 			}
-			// Cursor is in undated group
 			var m time.Time
 			if cursor.FileModifiedAt != nil {
 				m = cursor.FileModifiedAt.UTC()
+			} else if cursor.TimeVal != nil {
+				m = cursor.TimeVal.UTC()
 			}
 			cond := "(taken_at IS NULL AND (file_modified_at < ? OR (file_modified_at = ? AND id > ?)))"
-			args := []interface{}{m, m, cursor.ID}
-			return cond, args
+			return cond, []interface{}{m, m, cursor.ID}
 		} else {
-			// ASC
-			if cursor.TakenAt != nil && !cursor.TakenAt.IsZero() {
+			if cursor.TakenAt != nil {
 				t := cursor.TakenAt.UTC()
-				var m time.Time
-				if cursor.FileModifiedAt != nil {
-					m = cursor.FileModifiedAt.UTC()
-				}
-				cond := "((taken_at IS NOT NULL AND (taken_at > ? OR (taken_at = ? AND (file_modified_at > ? OR (file_modified_at = ? AND id > ?))))) OR taken_at IS NULL)"
-				args := []interface{}{t, t, m, m, cursor.ID}
-				return cond, args
+				cond := "((taken_at IS NOT NULL AND (taken_at > ? OR (taken_at = ? AND id > ?))) OR taken_at IS NULL)"
+				return cond, []interface{}{t, t, cursor.ID}
 			}
 			var m time.Time
 			if cursor.FileModifiedAt != nil {
 				m = cursor.FileModifiedAt.UTC()
+			} else if cursor.TimeVal != nil {
+				m = cursor.TimeVal.UTC()
 			}
 			cond := "(taken_at IS NULL AND (file_modified_at > ? OR (file_modified_at = ? AND id > ?)))"
-			args := []interface{}{m, m, cursor.ID}
-			return cond, args
+			return cond, []interface{}{m, m, cursor.ID}
 		}
 
 	case "modified", "file_modified_at":
 		var m time.Time
 		if cursor.FileModifiedAt != nil {
 			m = cursor.FileModifiedAt.UTC()
+		} else if cursor.TimeVal != nil {
+			m = cursor.TimeVal.UTC()
 		}
 		op := "<"
 		if dir == "ASC" {
@@ -229,20 +245,22 @@ func buildPhotoCursorCondition(sortBy, sortOrder string, cursor *CursorData) (st
 		return cond, []interface{}{m, m, cursor.ID}
 
 	case "filename", "name", "title":
+		s := cursor.StringVal
 		op := "<"
 		if dir == "ASC" {
 			op = ">"
 		}
 		cond := fmt.Sprintf("(original_filename COLLATE NOCASE %s ? OR (original_filename COLLATE NOCASE = ? AND id > ?))", op)
-		return cond, []interface{}{cursor.StringVal, cursor.StringVal, cursor.ID}
+		return cond, []interface{}{s, s, cursor.ID}
 
 	case "size", "file_size":
+		v := cursor.IntVal
 		op := "<"
 		if dir == "ASC" {
 			op = ">"
 		}
 		cond := fmt.Sprintf("(file_size %s ? OR (file_size = ? AND id > ?))", op)
-		return cond, []interface{}{cursor.IntVal, cursor.IntVal, cursor.ID}
+		return cond, []interface{}{v, v, cursor.ID}
 
 	case "created", "created_at":
 		var t time.Time
@@ -330,15 +348,22 @@ func (r *SQLitePhotoRepository) Create(ctx context.Context, p *models.Photo) err
 		p.FileModifiedAt = now
 	}
 
+	thumbStatus := "ready"
+	if p.ThumbnailStatus != nil && *p.ThumbnailStatus != "" {
+		thumbStatus = *p.ThumbnailStatus
+	}
+
 	query := `
 INSERT INTO photos (
     id, relative_path, original_filename, media_type, file_size,
-    width, height, taken_at, file_modified_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    width, height, duration, video_codec, audio_codec, container_format,
+    thumbnail_status, taken_at, file_modified_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := r.db.ExecContext(ctx, query,
 		p.ID, p.RelativePath, p.OriginalFilename, p.MediaType, p.FileSize,
-		p.Width, p.Height, p.TakenAt, p.FileModifiedAt, p.CreatedAt, p.UpdatedAt,
+		p.Width, p.Height, p.Duration, p.VideoCodec, p.AudioCodec, p.ContainerFormat,
+		thumbStatus, p.TakenAt, p.FileModifiedAt, p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "unique") {
@@ -353,15 +378,25 @@ INSERT INTO photos (
 // Update updates an existing photo record by ID.
 func (r *SQLitePhotoRepository) Update(ctx context.Context, p *models.Photo) error {
 	p.UpdatedAt = time.Now().UTC()
+
+	thumbStatus := "ready"
+	if p.ThumbnailStatus != nil && *p.ThumbnailStatus != "" {
+		thumbStatus = *p.ThumbnailStatus
+	}
+
 	query := `
 UPDATE photos
 SET original_filename = ?, media_type = ?, file_size = ?,
-    width = ?, height = ?, taken_at = ?, file_modified_at = ?, updated_at = ?
+    width = ?, height = ?, duration = ?, video_codec = ?, audio_codec = ?,
+    container_format = ?, thumbnail_status = ?, taken_at = ?,
+    file_modified_at = ?, updated_at = ?
 WHERE id = ?`
 
 	res, err := r.db.ExecContext(ctx, query,
 		p.OriginalFilename, p.MediaType, p.FileSize,
-		p.Width, p.Height, p.TakenAt, p.FileModifiedAt, p.UpdatedAt,
+		p.Width, p.Height, p.Duration, p.VideoCodec, p.AudioCodec,
+		p.ContainerFormat, thumbStatus, p.TakenAt,
+		p.FileModifiedAt, p.UpdatedAt,
 		p.ID,
 	)
 	if err != nil {
@@ -396,17 +431,9 @@ func (r *SQLitePhotoRepository) Delete(ctx context.Context, id string) error {
 
 // GetByID retrieves a photo by its stable ID.
 func (r *SQLitePhotoRepository) GetByID(ctx context.Context, id string) (*models.Photo, error) {
-	query := `
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
-FROM photos
-WHERE id = ?`
+	query := fmt.Sprintf(`SELECT %s FROM photos WHERE id = ?`, photoSelectColumns)
 
-	var p models.Photo
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
-		&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-		&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
-	)
+	p, err := scanPhoto(r.db.QueryRowContext(ctx, query, id))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -419,17 +446,9 @@ WHERE id = ?`
 
 // GetByRelativePath retrieves a photo by its relative storage path.
 func (r *SQLitePhotoRepository) GetByRelativePath(ctx context.Context, relPath string) (*models.Photo, error) {
-	query := `
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
-FROM photos
-WHERE relative_path = ?`
+	query := fmt.Sprintf(`SELECT %s FROM photos WHERE relative_path = ?`, photoSelectColumns)
 
-	var p models.Photo
-	err := r.db.QueryRowContext(ctx, query, relPath).Scan(
-		&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-		&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
-	)
+	p, err := scanPhoto(r.db.QueryRowContext(ctx, query, relPath))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -440,23 +459,34 @@ WHERE relative_path = ?`
 	return &p, nil
 }
 
-// List returns a paginated list of photos with deterministic ordering.
+// List returns a paginated list of photos ordered by sortBy and order.
 func (r *SQLitePhotoRepository) List(ctx context.Context, offset, limit int, sortBy, order string) ([]models.Photo, int, error) {
-	return r.SearchAndFilter(ctx, PhotoFilter{
+	photos, total, _, _, err := r.SearchAndFilterCursor(ctx, PhotoFilter{
 		Offset:    offset,
 		Limit:     limit,
 		SortBy:    sortBy,
 		SortOrder: order,
 	})
+	return photos, total, err
 }
 
-// SearchAndFilter returns a paginated slice of photos matching the given filter criteria, along with total count.
+// ListCursor returns a paginated list of photos using keyset cursor pagination.
+func (r *SQLitePhotoRepository) ListCursor(ctx context.Context, limit int, sortBy, order string, cursor *CursorData) ([]models.Photo, int, bool, *CursorData, error) {
+	return r.SearchAndFilterCursor(ctx, PhotoFilter{
+		Limit:     limit,
+		Cursor:    cursor,
+		SortBy:    sortBy,
+		SortOrder: order,
+	})
+}
+
+// SearchAndFilter returns photos matching criteria using offset pagination.
 func (r *SQLitePhotoRepository) SearchAndFilter(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, error) {
 	photos, total, _, _, err := r.SearchAndFilterCursor(ctx, filter)
 	return photos, total, err
 }
 
-// SearchAndFilterCursor executes a cursor-based query for photos matching the given filter criteria without using SQL OFFSET.
+// SearchAndFilterCursor returns photos matching criteria with cursor-based keyset pagination.
 func (r *SQLitePhotoRepository) SearchAndFilterCursor(ctx context.Context, filter PhotoFilter) ([]models.Photo, int, bool, *CursorData, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -466,17 +496,17 @@ func (r *SQLitePhotoRepository) SearchAndFilterCursor(ctx context.Context, filte
 		limit = 200
 	}
 
-	whereSQL, args := buildPhotoFilterConditions(filter)
+	baseWhereSQL, baseArgs := buildPhotoFilterConditions(filter)
 
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM photos %s", whereSQL)
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM photos %s", baseWhereSQL)
 	var total int
-	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRowContext(ctx, countQuery, baseArgs...).Scan(&total); err != nil {
 		return nil, 0, false, nil, fmt.Errorf("failed to count filtered photos: %w", err)
 	}
 
-	cursorWhereSQL := whereSQL
-	cursorArgs := make([]interface{}, len(args))
-	copy(cursorArgs, args)
+	cursorWhereSQL := baseWhereSQL
+	cursorArgs := make([]interface{}, len(baseArgs))
+	copy(cursorArgs, baseArgs)
 
 	if filter.Cursor != nil && filter.Cursor.ID != "" {
 		cCond, cArgs := buildPhotoCursorCondition(filter.SortBy, filter.SortOrder, filter.Cursor)
@@ -498,21 +528,19 @@ func (r *SQLitePhotoRepository) SearchAndFilterCursor(ctx context.Context, filte
 
 	if filter.Cursor == nil && filter.Offset > 0 {
 		dataQuery = fmt.Sprintf(`
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
+SELECT %s
 FROM photos
 %s
 ORDER BY %s
-LIMIT ? OFFSET ?`, cursorWhereSQL, orderBy)
+LIMIT ? OFFSET ?`, photoSelectColumns, cursorWhereSQL, orderBy)
 		queryArgs = append(queryArgs, limit+1, filter.Offset)
 	} else {
 		dataQuery = fmt.Sprintf(`
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
+SELECT %s
 FROM photos
 %s
 ORDER BY %s
-LIMIT ?`, cursorWhereSQL, orderBy)
+LIMIT ?`, photoSelectColumns, cursorWhereSQL, orderBy)
 		queryArgs = append(queryArgs, limit+1)
 	}
 
@@ -524,11 +552,8 @@ LIMIT ?`, cursorWhereSQL, orderBy)
 
 	photos := make([]models.Photo, 0, limit+1)
 	for rows.Next() {
-		var p models.Photo
-		if err := rows.Scan(
-			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
-		); err != nil {
+		p, err := scanPhoto(rows)
+		if err != nil {
 			return nil, 0, false, nil, fmt.Errorf("failed to scan filtered photo: %w", err)
 		}
 		photos = append(photos, p)
@@ -593,12 +618,11 @@ func (r *SQLitePhotoRepository) ListByFolder(ctx context.Context, folderPath str
 	orderByClause := buildPhotoOrderBy(sortBy, order)
 
 	query := fmt.Sprintf(`
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
+SELECT %s
 FROM photos
 WHERE %s
 ORDER BY %s
-LIMIT ? OFFSET ?`, whereClause, orderByClause)
+LIMIT ? OFFSET ?`, photoSelectColumns, whereClause, orderByClause)
 
 	queryArgs := make([]interface{}, len(countArgs), len(countArgs)+2)
 	copy(queryArgs, countArgs)
@@ -612,11 +636,8 @@ LIMIT ? OFFSET ?`, whereClause, orderByClause)
 
 	photos := make([]models.Photo, 0, limit)
 	for rows.Next() {
-		var p models.Photo
-		if err := rows.Scan(
-			&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-			&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
-		); err != nil {
+		p, err := scanPhoto(rows)
+		if err != nil {
 			return nil, 0, fmt.Errorf("failed to scan photo: %w", err)
 		}
 		photos = append(photos, p)
@@ -656,8 +677,8 @@ func (r *SQLitePhotoRepository) CountByFolder(ctx context.Context, folderPath st
 	} else {
 		prefix := normPath + "/"
 		if recursive {
-			query = "SELECT COUNT(*) FROM photos WHERE SUBSTR(relative_path, 1, ?) = ?"
-			args = append(args, len(prefix), prefix)
+			query = "SELECT COUNT(*) FROM photos WHERE relative_path = ? OR SUBSTR(relative_path, 1, ?) = ?"
+			args = append(args, normPath, len(prefix), prefix)
 		} else {
 			query = "SELECT COUNT(*) FROM photos WHERE SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0"
 			args = append(args, len(prefix), prefix, len(prefix)+1)
@@ -666,7 +687,7 @@ func (r *SQLitePhotoRepository) CountByFolder(ctx context.Context, folderPath st
 
 	var count int
 	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("failed to count photos for folder %q (recursive=%v): %w", normPath, recursive, err)
+		return 0, fmt.Errorf("failed to count photos in folder %q (recursive=%v): %w", normPath, recursive, err)
 	}
 	return count, nil
 }
@@ -679,29 +700,23 @@ func (r *SQLitePhotoRepository) GetFolderCoverPhoto(ctx context.Context, folderP
 	var args []interface{}
 
 	if normPath == "" {
-		query = `
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
+		query = fmt.Sprintf(`
+SELECT %s
 FROM photos
 ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC
-LIMIT 1`
+LIMIT 1`, photoSelectColumns)
 	} else {
 		prefix := normPath + "/"
-		query = `
-SELECT id, relative_path, original_filename, media_type, file_size,
-       width, height, taken_at, file_modified_at, created_at, updated_at
+		query = fmt.Sprintf(`
+SELECT %s
 FROM photos
 WHERE SUBSTR(relative_path, 1, ?) = ?
 ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC
-LIMIT 1`
+LIMIT 1`, photoSelectColumns)
 		args = append(args, len(prefix), prefix)
 	}
 
-	var p models.Photo
-	err := r.db.QueryRowContext(ctx, query, args...).Scan(
-		&p.ID, &p.RelativePath, &p.OriginalFilename, &p.MediaType, &p.FileSize,
-		&p.Width, &p.Height, &p.TakenAt, &p.FileModifiedAt, &p.CreatedAt, &p.UpdatedAt,
-	)
+	p, err := scanPhoto(r.db.QueryRowContext(ctx, query, args...))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

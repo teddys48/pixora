@@ -45,7 +45,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 FROM alpine:3.21 AS runtime
 
 # Install basic root certificates for HTTPS outgoing requests and tzdata
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata ffmpeg
 
 # Create dedicated non-root user and group with standard UID/GID 1000
 # (Aligns with typical Linux host user for seamless bind mount access)

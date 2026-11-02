@@ -1,8 +1,8 @@
 import React from 'react'
 import { Photo, PhotoViewMode } from '@/types/photo'
 import { FallbackImage } from '@/components/ui/FallbackImage'
-import { formatDate, formatBytes } from '@/lib/utils'
-import { Camera, Maximize2, X } from 'lucide-react'
+import { formatDate, formatBytes, formatDuration } from '@/lib/utils'
+import { Camera, Maximize2, X, Play } from 'lucide-react'
 
 interface PhotoCardProps {
   photo: Photo
@@ -19,6 +19,8 @@ export function PhotoCard({
   onRemove,
   removeLabel = 'Remove',
 }: PhotoCardProps) {
+  const isVideo = photo.type === 'video' || Boolean(photo.mediaType?.startsWith('video/'))
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
@@ -29,9 +31,9 @@ export function PhotoCard({
   const isCaptureDate = Boolean(photo.takenAt && !photo.isUndated)
   const hasFallbackDate = Boolean(!isCaptureDate && photo.fileModifiedAt)
   const dateTitle = isCaptureDate
-    ? 'Verified EXIF capture date'
+    ? (isVideo ? 'Verified video creation date' : 'Verified EXIF capture date')
     : hasFallbackDate
-    ? 'Filesystem modification time (fallback, no EXIF capture date)'
+    ? 'Filesystem modification time (fallback, no capture date)'
     : 'No reliable date available'
   const displayDate = isCaptureDate
     ? formatDate(photo.takenAt)
@@ -50,19 +52,33 @@ export function PhotoCard({
         className="group flex items-center justify-between p-3 rounded-xl border border-border bg-card hover:bg-muted/40 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <div className="flex items-center gap-4 min-w-0">
-          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden shrink-0 border border-border/50 bg-muted/40 flex items-center justify-center">
+          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden shrink-0 border border-border/50 bg-muted/40 flex items-center justify-center relative">
             <FallbackImage
               src={photo.thumbnailUrl}
               alt={photo.title}
               aspectRatio="square"
+              isVideo={isVideo}
               className="w-full h-full flex items-center justify-center"
               imgClassName="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
             />
+            {isVideo && (
+              <div className="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-black/80 text-white text-[9px] font-mono flex items-center gap-0.5 pointer-events-none">
+                <Play className="w-2 h-2 fill-current" />
+                {photo.duration && photo.duration > 0 ? formatDuration(photo.duration) : 'VID'}
+              </div>
+            )}
           </div>
           <div className="min-w-0">
-            <h3 className="font-semibold text-sm text-foreground truncate group-hover:text-primary transition-colors">
-              {photo.title}
-            </h3>
+            <div className="flex items-center gap-2">
+              <h3 className="font-semibold text-sm text-foreground truncate group-hover:text-primary transition-colors">
+                {photo.title}
+              </h3>
+              {isVideo && (
+                <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-primary/10 text-primary border border-primary/20 shrink-0">
+                  Video
+                </span>
+              )}
+            </div>
             <p className="text-xs text-muted-foreground truncate mt-0.5">{photo.filename}</p>
             <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
               <span
@@ -77,14 +93,21 @@ export function PhotoCard({
                   {photo.metadata.camera}
                 </span>
               )}
+              {isVideo && photo.videoCodec && (
+                <span className="hidden sm:inline-block font-mono text-[10px] uppercase text-muted-foreground/80">
+                  {photo.videoCodec}
+                </span>
+              )}
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0 pl-2">
-          <span className="hidden md:inline font-mono">
-            {photo.metadata.width} × {photo.metadata.height}
-          </span>
+          {photo.metadata.width > 0 && photo.metadata.height > 0 && (
+            <span className="hidden md:inline font-mono">
+              {photo.metadata.width} × {photo.metadata.height}
+            </span>
+          )}
           <span className="font-mono">{formatBytes(photo.size)}</span>
           {onRemove && (
             <button
@@ -102,10 +125,10 @@ export function PhotoCard({
           )}
           <button
             type="button"
-            aria-label="View photo"
+            aria-label={isVideo ? 'Play video' : 'View photo'}
             className="p-1.5 rounded-md hover:bg-muted text-muted-foreground group-hover:text-foreground"
           >
-            <Maximize2 className="w-4 h-4" />
+            {isVideo ? <Play className="w-4 h-4 fill-current" /> : <Maximize2 className="w-4 h-4" />}
           </button>
         </div>
       </div>
@@ -126,15 +149,33 @@ export function PhotoCard({
         <FallbackImage
           src={photo.thumbnailUrl}
           alt={photo.title}
+          isVideo={isVideo}
           className="w-full h-full flex items-center justify-center"
           imgClassName="w-full h-full object-contain group-hover:scale-105 transition-transform duration-500 ease-out"
         />
 
+        {/* Video indicator badge (bottom left) */}
+        {isVideo && (
+          <div className="absolute bottom-2 left-2 z-10 flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[10px] font-medium font-mono backdrop-blur-sm shadow-sm pointer-events-none">
+            <Play className="w-2.5 h-2.5 fill-current" />
+            <span>{photo.duration && photo.duration > 0 ? formatDuration(photo.duration) : 'VIDEO'}</span>
+          </div>
+        )}
+
         {/* Hover overlay with quick preview indicator */}
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center p-3 pointer-events-none">
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/70 text-white text-xs font-medium backdrop-blur-sm shadow-sm">
-            <Maximize2 className="w-3.5 h-3.5" />
-            <span>View</span>
+            {isVideo ? (
+              <>
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Play</span>
+              </>
+            ) : (
+              <>
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>View</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -186,11 +227,19 @@ export function PhotoCard({
             <span className="truncate max-w-[120px] opacity-80" title={photo.metadata.camera}>
               {photo.metadata.camera.replace('Sony ', '').replace('Fujifilm ', '').replace('Canon EOS ', '')}
             </span>
-          ) : (
+          ) : isVideo && photo.videoCodec ? (
+            <span className="font-mono text-[10px] uppercase opacity-80">
+              {photo.videoCodec}
+            </span>
+          ) : photo.metadata.width > 0 && photo.metadata.height > 0 ? (
             <span className="font-mono opacity-80">
               {photo.metadata.width}×{photo.metadata.height}
             </span>
-          )}
+          ) : isVideo ? (
+            <span className="font-medium text-primary text-[10px]">
+              VIDEO
+            </span>
+          ) : null}
         </div>
       </div>
     </div>

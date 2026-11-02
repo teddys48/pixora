@@ -979,3 +979,297 @@ func TestPhotoSearchAndFilteringAPI(t *testing.T) {
 		t.Errorf("Timeline search q=lake failed: total=%d", tlResp.Total)
 	}
 }
+
+func TestVideoStreamRangeAndHeaders(t *testing.T) {
+	app, db, store, _, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	ctx := t.Context()
+
+	// Create test video file
+	videoDir := filepath.Join(store.Root(), "videos")
+	_ = os.MkdirAll(videoDir, 0755)
+	videoData := make([]byte, 1000)
+	for i := range videoData {
+		videoData[i] = byte(i % 256)
+	}
+	videoRelPath := "videos/sample.mp4"
+	if err := os.WriteFile(filepath.Join(store.Root(), videoRelPath), videoData, 0644); err != nil {
+		t.Fatalf("Failed to write test video: %v", err)
+	}
+
+	dur := 15.5
+	w, h := 1920, 1080
+	vCodec := "h264"
+	aCodec := "aac"
+	container := "mp4"
+	videoPhoto := &models.Photo{
+		ID:               "v-sample-1",
+		OriginalFilename: "sample.mp4",
+		RelativePath:     videoRelPath,
+		FileSize:         int64(len(videoData)),
+		MediaType:        "video/mp4",
+		Width:            &w,
+		Height:           &h,
+		Duration:         &dur,
+		VideoCodec:       &vCodec,
+		AudioCodec:       &aCodec,
+		ContainerFormat:  &container,
+		ThumbnailStatus:  func() *string { s := "ready"; return &s }(),
+	}
+	if err := photoRepo.Create(ctx, videoPhoto); err != nil {
+		t.Fatalf("Failed to create video record: %v", err)
+	}
+
+	// 1. Full content request (no Range header)
+	req := httptest.NewRequest("GET", "/api/photos/v-sample-1/file", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "video/mp4") {
+		t.Errorf("Expected Content-Type video/mp4, got %s", ct)
+	}
+	if ar := resp.Header.Get("Accept-Ranges"); ar != "bytes" {
+		t.Errorf("Expected Accept-Ranges bytes, got %s", ar)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 1000 {
+		t.Errorf("Expected body length 1000, got %d", len(body))
+	}
+
+	// 2. Range request: bytes=0-9 (first 10 bytes)
+	req = httptest.NewRequest("GET", "/api/photos/v-sample-1/file", nil)
+	req.Header.Set("Range", "bytes=0-9")
+	resp, err = app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusPartialContent {
+		t.Fatalf("Expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+	cr := resp.Header.Get("Content-Range")
+	if cr != "bytes 0-9/1000" {
+		t.Errorf("Expected Content-Range bytes 0-9/1000, got %s", cr)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	if len(body) != 10 {
+		t.Errorf("Expected body length 10, got %d", len(body))
+	}
+	if !bytes.Equal(body, videoData[0:10]) {
+		t.Errorf("Body content mismatch on range 0-9")
+	}
+
+	// 3. Range request: bytes=100-199
+	req = httptest.NewRequest("GET", "/api/photos/v-sample-1/file", nil)
+	req.Header.Set("Range", "bytes=100-199")
+	resp, err = app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusPartialContent {
+		t.Fatalf("Expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+	if cr := resp.Header.Get("Content-Range"); cr != "bytes 100-199/1000" {
+		t.Errorf("Expected Content-Range bytes 100-199/1000, got %s", cr)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	if !bytes.Equal(body, videoData[100:200]) {
+		t.Errorf("Body content mismatch on range 100-199")
+	}
+
+	// 4. Suffix range request: bytes=900-
+	req = httptest.NewRequest("GET", "/api/photos/v-sample-1/file", nil)
+	req.Header.Set("Range", "bytes=900-")
+	resp, err = app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusPartialContent {
+		t.Fatalf("Expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+	if cr := resp.Header.Get("Content-Range"); cr != "bytes 900-999/1000" {
+		t.Errorf("Expected Content-Range bytes 900-999/1000, got %s", cr)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	if !bytes.Equal(body, videoData[900:1000]) {
+		t.Errorf("Body content mismatch on range 900-")
+	}
+
+	// 5. Out of bounds range request: bytes=5000-6000
+	req = httptest.NewRequest("GET", "/api/photos/v-sample-1/file", nil)
+	req.Header.Set("Range", "bytes=5000-6000")
+	resp, err = app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusRequestedRangeNotSatisfiable {
+		t.Errorf("Expected 416 Range Not Satisfiable, got %d", resp.StatusCode)
+	}
+}
+
+func TestVideoThumbnailSafetyAndFallback(t *testing.T) {
+	app, db, store, _, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	ctx := t.Context()
+
+	// Create test video file
+	videoDir := filepath.Join(store.Root(), "videos")
+	_ = os.MkdirAll(videoDir, 0755)
+	videoData := []byte("fake video content that cannot be converted to thumbnail")
+	videoRelPath := "videos/test_safety.mp4"
+	_ = os.WriteFile(filepath.Join(store.Root(), videoRelPath), videoData, 0644)
+
+	videoPhoto := &models.Photo{
+		ID:               "v-safety-1",
+		OriginalFilename: "test_safety.mp4",
+		RelativePath:     videoRelPath,
+		FileSize:         int64(len(videoData)),
+		MediaType:        "video/mp4",
+		ThumbnailStatus:  func() *string { s := "failed"; return &s }(),
+	}
+	if err := photoRepo.Create(ctx, videoPhoto); err != nil {
+		t.Fatalf("Failed to create video: %v", err)
+	}
+
+	// Request thumbnail for video without cached thumbnail
+	req := httptest.NewRequest("GET", "/api/photos/v-safety-1/thumbnail", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+
+	// Crucial invariant: MUST NOT return original video file as thumbnail!
+	if resp.StatusCode == fiber.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if bytes.Equal(body, videoData) {
+			t.Fatalf("SECURITY/CONTRACT VIOLATION: video thumbnail returned raw video file!")
+		}
+	} else if resp.StatusCode != fiber.StatusNotFound {
+		t.Errorf("Expected 404 for video without generated thumbnail, got %d", resp.StatusCode)
+	}
+
+	// Now place a valid thumbnail in thumbnails/v-safety-1.jpg
+	thumbDir := store.ThumbnailsDir()
+	_ = os.MkdirAll(thumbDir, 0755)
+	jpegData := createTestJPEG(200, 200)
+	_ = os.WriteFile(filepath.Join(thumbDir, "v-safety-1.jpg"), jpegData, 0644)
+
+	req = httptest.NewRequest("GET", "/api/photos/v-safety-1/thumbnail", nil)
+	resp, err = app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 OK when thumbnail exists, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(body, jpegData) {
+		t.Errorf("Thumbnail body did not match expected JPEG data")
+	}
+}
+
+func TestVideoMediaTypeFilteringAndDetails(t *testing.T) {
+	app, db, store, _, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	photoRepo := repository.NewSQLitePhotoRepository(db)
+	ctx := t.Context()
+
+	// 1 photo, 1 video
+	pRel := "originals/photo1.jpg"
+	_ = os.MkdirAll(filepath.Join(store.Root(), "originals"), 0755)
+	_ = os.WriteFile(filepath.Join(store.Root(), pRel), createTestJPEG(100, 100), 0644)
+	photo := &models.Photo{
+		ID:               "p-photo-1",
+		OriginalFilename: "photo1.jpg",
+		RelativePath:     pRel,
+		FileSize:         500,
+		MediaType:        "image/jpeg",
+	}
+	_ = photoRepo.Create(ctx, photo)
+
+	vRel := "originals/clip.mp4"
+	_ = os.WriteFile(filepath.Join(store.Root(), vRel), []byte("mp4-data"), 0644)
+	dur := 42.0
+	vc := "h264"
+	ac := "aac"
+	cf := "mp4"
+	video := &models.Photo{
+		ID:               "v-video-1",
+		OriginalFilename: "clip.mp4",
+		RelativePath:     vRel,
+		FileSize:         800,
+		MediaType:        "video/mp4",
+		Duration:         &dur,
+		VideoCodec:       &vc,
+		AudioCodec:       &ac,
+		ContainerFormat:  &cf,
+		ThumbnailStatus:  func() *string { s := "ready"; return &s }(),
+	}
+	_ = photoRepo.Create(ctx, video)
+
+	// GET /api/photos/:id for video
+	req := httptest.NewRequest("GET", "/api/photos/v-video-1", nil)
+	resp, _ := app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var detail api.PhotoResponse
+	_ = json.Unmarshal(body, &detail)
+	if detail.Type != "video" {
+		t.Errorf("Expected Type video, got %q", detail.Type)
+	}
+	if detail.Duration == nil || *detail.Duration != 42.0 {
+		t.Errorf("Expected Duration 42.0, got %v", detail.Duration)
+	}
+	if detail.VideoCodec == nil || *detail.VideoCodec != "h264" {
+		t.Errorf("Expected VideoCodec h264, got %v", detail.VideoCodec)
+	}
+
+	// Filter mediaType=video
+	req = httptest.NewRequest("GET", "/api/photos?mediaType=video", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var vList struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &vList)
+	if vList.Total != 1 || len(vList.Photos) != 1 || vList.Photos[0].ID != "v-video-1" {
+		t.Errorf("Expected only v-video-1 for mediaType=video, got total=%d", vList.Total)
+	}
+
+	// Filter mediaType=photo
+	req = httptest.NewRequest("GET", "/api/photos?mediaType=photo", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var pList struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &pList)
+	if pList.Total != 1 || len(pList.Photos) != 1 || pList.Photos[0].ID != "p-photo-1" {
+		t.Errorf("Expected only p-photo-1 for mediaType=photo, got total=%d", pList.Total)
+	}
+
+	// Filter mediaType=all
+	req = httptest.NewRequest("GET", "/api/photos?mediaType=all", nil)
+	resp, _ = app.Test(req, -1)
+	body, _ = io.ReadAll(resp.Body)
+	var allList struct {
+		Photos []api.PhotoResponse `json:"photos"`
+		Total  int                 `json:"total"`
+	}
+	_ = json.Unmarshal(body, &allList)
+	if allList.Total != 2 {
+		t.Errorf("Expected 2 items for mediaType=all, got total=%d", allList.Total)
+	}
+}

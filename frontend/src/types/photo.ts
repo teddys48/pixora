@@ -39,6 +39,13 @@ export interface Photo {
   metadata: PhotoMetadata
   prevId?: string
   nextId?: string
+  type?: "photo" | "video"
+  mediaType?: string
+  duration?: number
+  videoCodec?: string
+  audioCodec?: string
+  containerFormat?: string
+  thumbnailStatus?: string
 }
 
 export interface PhotoResponse {
@@ -61,6 +68,12 @@ export interface PhotoResponse {
   exif?: ExifDetails
   prevId?: string
   nextId?: string
+  type?: "photo" | "video"
+  duration?: number
+  videoCodec?: string
+  audioCodec?: string
+  containerFormat?: string
+  thumbnailStatus?: string
 }
 
 export interface PhotoListResponse {

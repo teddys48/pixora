@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-// Photo represents an indexed photo entity.
+// Photo represents an indexed photo or video media entity.
 type Photo struct {
 	ID               string     `json:"id"`
 	RelativePath     string     `json:"relativePath"`
@@ -11,6 +11,11 @@ type Photo struct {
 	FileSize         int64      `json:"fileSize"`
 	Width            *int       `json:"width,omitempty"`
 	Height           *int       `json:"height,omitempty"`
+	Duration         *float64   `json:"duration,omitempty"`
+	VideoCodec       *string    `json:"videoCodec,omitempty"`
+	AudioCodec       *string    `json:"audioCodec,omitempty"`
+	ContainerFormat  *string    `json:"containerFormat,omitempty"`
+	ThumbnailStatus  *string    `json:"thumbnailStatus,omitempty"`
 	TakenAt          *time.Time `json:"takenAt,omitempty"`
 	FileModifiedAt   time.Time  `json:"fileModifiedAt"`
 	CreatedAt        time.Time  `json:"createdAt"`

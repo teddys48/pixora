@@ -401,7 +401,13 @@ export function GalleryControls({
                 aria-label="Filter by media type"
                 className="w-full h-8 px-2.5 rounded-md border border-input bg-card text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
               >
-                <option value="">All Supported Formats</option>
+                <option value="">All Media Types</option>
+                <option value="photo">Photos Only</option>
+                <option value="video">Videos Only</option>
+                <option value="video/mp4">MP4 (.mp4)</option>
+                <option value="video/webm">WebM (.webm)</option>
+                <option value="video/quicktime">MOV (.mov)</option>
+                <option value="video/x-matroska">MKV (.mkv)</option>
                 <option value="image/jpeg">JPEG (.jpg, .jpeg)</option>
                 <option value="image/png">PNG (.png)</option>
                 <option value="image/webp">WebP (.webp)</option>
@@ -546,7 +552,7 @@ export function GalleryControls({
           {mediaTypeFilter && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary/10 text-primary border border-primary/20 text-xs">
               <FileType className="w-3 h-3" />
-              <span>Format: {mediaTypeFilter.replace('image/', '').toUpperCase()}</span>
+              <span>Format: {mediaTypeFilter === "photo" ? "Photos Only" : mediaTypeFilter === "video" ? "Videos Only" : mediaTypeFilter.replace(/^(image|video)\//, "").toUpperCase()}</span>
               <button
                 type="button"
                 onClick={() => onMediaTypeFilterChange?.('')}

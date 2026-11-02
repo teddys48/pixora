@@ -67,15 +67,11 @@ func (s *Scanner) Status() ScanStatus {
 }
 
 // Scan performs media discovery and indexing across the entire storage root.
-// If another scan is already running, it returns ErrScanInProgress.
 func (s *Scanner) Scan(ctx context.Context) (ScanStatus, error) {
 	return s.ScanPath(ctx, "")
 }
 
 // ScanPath performs media discovery and indexing for a specific relative folder under storage root.
-// If relPath is empty, it scans the entire storage root.
-// Deduplication is enforced via relative_path; unchanged files are skipped, and no duplicates are created.
-// Optional forceRefresh argument re-extracts metadata for existing records without modifying original files.
 func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefresh ...bool) (ScanStatus, error) {
 	if s.storage == nil {
 		return ScanStatus{Status: "failed"}, errors.New("storage unavailable")
@@ -175,7 +171,7 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 			return nil
 		}
 
-		// Check file extension
+		// Check file extension (photos and videos)
 		if !media.IsSupportedExtension(name) {
 			return nil
 		}
@@ -216,8 +212,9 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 
 		fileSize := info.Size()
 		fileModTime := info.ModTime().UTC()
+		isVideo := media.IsSupportedVideoExtension(name)
 
-		// Check if photo is already in database
+		// Check if media is already in database
 		existing, err := s.photoRepo.GetByRelativePath(ctx, relPath)
 		if err == nil && existing != nil {
 			// Record exists: check if file was modified (or force refresh requested)
@@ -227,6 +224,48 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 			}
 
 			// File changed or refresh requested: re-extract metadata and update
+			if isVideo {
+				vMeta, vErr := s.inspectVideo(ctx, relPath)
+				if vErr != nil {
+					failed++
+					if len(errList) < 50 {
+						errList = append(errList, fmt.Sprintf("failed to extract video metadata for %s: %v", relPath, vErr))
+					}
+					return nil
+				}
+				existing.FileSize = fileSize
+				existing.FileModifiedAt = fileModTime
+				existing.MediaType = vMeta.MediaType
+				if vMeta.Width > 0 && vMeta.Height > 0 {
+					existing.Width = &vMeta.Width
+					existing.Height = &vMeta.Height
+				}
+				if vMeta.Duration > 0 {
+					existing.Duration = &vMeta.Duration
+				}
+				if vMeta.VideoCodec != "" {
+					existing.VideoCodec = &vMeta.VideoCodec
+				}
+				if vMeta.AudioCodec != "" {
+					existing.AudioCodec = &vMeta.AudioCodec
+				}
+				if vMeta.ContainerFormat != "" {
+					existing.ContainerFormat = &vMeta.ContainerFormat
+				}
+				if vMeta.CreationTime != nil {
+					existing.TakenAt = vMeta.CreationTime
+				}
+				existing.UpdatedAt = time.Now().UTC()
+
+				if err := s.photoRepo.Update(ctx, existing); err != nil {
+					failed++
+				} else {
+					updated++
+				}
+				return nil
+			}
+
+			// Photo update
 			meta, extractErr := s.inspectFile(relPath)
 			if extractErr != nil {
 				failed++
@@ -254,7 +293,72 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 			return nil
 		}
 
-		// New photo: extract metadata
+		// New media record: extract metadata
+		if isVideo {
+			vMeta, vErr := s.inspectVideo(ctx, relPath)
+			if vErr != nil {
+				failed++
+				if len(errList) < 50 {
+					errList = append(errList, fmt.Sprintf("failed to read video %s: %v", relPath, vErr))
+				}
+				return nil
+			}
+
+			photoID := uuid.New().String()
+			var wPtr, hPtr *int
+			if vMeta.Width > 0 && vMeta.Height > 0 {
+				wPtr = &vMeta.Width
+				hPtr = &vMeta.Height
+			}
+			var durPtr *float64
+			if vMeta.Duration > 0 {
+				durPtr = &vMeta.Duration
+			}
+			var vCodecPtr *string
+			if vMeta.VideoCodec != "" {
+				vCodecPtr = &vMeta.VideoCodec
+			}
+			var aCodecPtr *string
+			if vMeta.AudioCodec != "" {
+				aCodecPtr = &vMeta.AudioCodec
+			}
+			var cFormatPtr *string
+			if vMeta.ContainerFormat != "" {
+				cFormatPtr = &vMeta.ContainerFormat
+			}
+			thumbStatus := "ready"
+
+			newMedia := &models.Photo{
+				ID:               photoID,
+				RelativePath:     relPath,
+				OriginalFilename: name,
+				MediaType:        vMeta.MediaType,
+				FileSize:         fileSize,
+				Width:            wPtr,
+				Height:           hPtr,
+				Duration:         durPtr,
+				VideoCodec:       vCodecPtr,
+				AudioCodec:       aCodecPtr,
+				ContainerFormat:  cFormatPtr,
+				ThumbnailStatus:  &thumbStatus,
+				TakenAt:          vMeta.CreationTime,
+				FileModifiedAt:   fileModTime,
+				CreatedAt:        time.Now().UTC(),
+				UpdatedAt:        time.Now().UTC(),
+			}
+
+			if err := s.photoRepo.Create(ctx, newMedia); err != nil {
+				failed++
+				if len(errList) < 50 {
+					errList = append(errList, fmt.Sprintf("failed to index video %s: %v", relPath, err))
+				}
+			} else {
+				indexed++
+			}
+			return nil
+		}
+
+		// New Photo
 		meta, extractErr := s.inspectFile(relPath)
 		if extractErr != nil {
 			failed++
@@ -335,4 +439,13 @@ func (s *Scanner) inspectFile(relPath string) (media.ImageInfo, error) {
 	defer f.Close()
 
 	return media.ExtractMetadata(f)
+}
+
+// inspectVideo extracts metadata from a video file under storage root.
+func (s *Scanner) inspectVideo(ctx context.Context, relPath string) (media.VideoInfo, error) {
+	resolved, err := s.storage.ResolvePath(relPath)
+	if err != nil {
+		return media.VideoInfo{}, err
+	}
+	return media.ExtractVideoMetadata(ctx, resolved)
 }

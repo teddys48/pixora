@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,16 +42,22 @@ const (
 	DateSourceNone DateSource = "none"
 )
 
-// PhotoResponse represents a photo formatted for client consumption.
+// PhotoResponse represents a photo or video formatted for client consumption.
 type PhotoResponse struct {
 	ID               string             `json:"id"`
 	RelativePath     string             `json:"relativePath"`
 	Folder           string             `json:"folder"` // relative physical folder path e.g. "Pictures/vacation" or ""
 	OriginalFilename string             `json:"originalFilename"`
 	MediaType        string             `json:"mediaType"`
+	Type             string             `json:"type"` // "photo" or "video"
 	FileSize         int64              `json:"fileSize"`
 	Width            *int               `json:"width,omitempty"`
 	Height           *int               `json:"height,omitempty"`
+	Duration         *float64           `json:"duration,omitempty"`
+	VideoCodec       *string            `json:"videoCodec,omitempty"`
+	AudioCodec       *string            `json:"audioCodec,omitempty"`
+	ContainerFormat  *string            `json:"containerFormat,omitempty"`
+	ThumbnailStatus  *string            `json:"thumbnailStatus,omitempty"`
 	TakenAt          *time.Time         `json:"takenAt,omitempty"`
 	FileModifiedAt   time.Time          `json:"fileModifiedAt"`
 	CreatedAt        time.Time          `json:"createdAt"`
@@ -123,9 +128,6 @@ func (r *TimelineResponse) UnmarshalJSON(data []byte) error {
 }
 
 // parseFilterDate parses date query parameters safely into UTC time.
-// Supports RFC3339 and standard YYYY-MM-DD.
-// When isEnd is true, YYYY-MM-DD dates resolve to 23:59:59.999999999 UTC (inclusive end-of-day).
-// When isEnd is false, YYYY-MM-DD dates resolve to 00:00:00 UTC (inclusive start-of-day).
 func parseFilterDate(s string, isEnd bool) (*time.Time, error) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
@@ -148,45 +150,39 @@ func parseFilterDate(s string, isEnd bool) (*time.Time, error) {
 		return &startOfDay, nil
 	}
 
-	// 3. Try ISO-like datetime YYYY-MM-DDTHH:MM:SS
-	if t, err := time.Parse("2006-01-02T15:04:05", trimmed); err == nil {
-		utc := t.UTC()
-		return &utc, nil
-	}
-
-	return nil, fmt.Errorf("invalid date format %q: expected YYYY-MM-DD or RFC3339", trimmed)
+	return nil, fmt.Errorf("invalid date format %q: expected YYYY-MM-DD or RFC3339", s)
 }
 
+// parsePhotoFilterParams validates and maps HTTP query parameters into repository.PhotoFilter.
 func parsePhotoFilterParams(c *fiber.Ctx) (repository.PhotoFilter, error) {
-	q := c.Query("q", c.Query("search", ""))
+	q := strings.TrimSpace(c.Query("q"))
 
-	// Date filtering
-	startStr := c.Query("startDate", c.Query("start_date", ""))
-	startDate, err := parseFilterDate(startStr, false)
+	// Date range parsing & validation
+	startDateStr := c.Query("startDate")
+	endDateStr := c.Query("endDate")
+
+	startDate, err := parseFilterDate(startDateStr, false)
 	if err != nil {
 		return repository.PhotoFilter{}, fmt.Errorf("invalid startDate: %w", err)
 	}
 
-	endStr := c.Query("endDate", c.Query("end_date", ""))
-	endDate, err := parseFilterDate(endStr, true)
+	endDate, err := parseFilterDate(endDateStr, true)
 	if err != nil {
 		return repository.PhotoFilter{}, fmt.Errorf("invalid endDate: %w", err)
 	}
 
 	if startDate != nil && endDate != nil && startDate.After(*endDate) {
-		return repository.PhotoFilter{}, errors.New("startDate cannot be after endDate")
+		return repository.PhotoFilter{}, errors.New("startDate must be earlier than or equal to endDate")
 	}
 
-	// Folder filtering with path traversal prevention
-	folder := c.Query("folder", c.Query("folderPath", ""))
-	if folder != "" {
-		cleaned := filepath.Clean(folder)
-		if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "\x00") {
-			return repository.PhotoFilter{}, errors.New("invalid folder: path traversal is not permitted")
+	// Folder filtering
+	folder := c.Query("folder")
+	if folder != "" && folder != "/" && folder != "." {
+		if _, err := storage.ValidateFolderPath(folder); err != nil {
+			return repository.PhotoFilter{}, fmt.Errorf("invalid folder parameter: %w", err)
 		}
 	}
 
-	// Recursive default is true unless explicitly "false"
 	recursive := true
 	if rStr := c.Query("recursive"); rStr != "" {
 		if r, err := strconv.ParseBool(rStr); err == nil {
@@ -232,8 +228,8 @@ func parsePhotoFilterParams(c *fiber.Ctx) (repository.PhotoFilter, error) {
 		if err != nil || parsed < 1 {
 			return repository.PhotoFilter{}, errors.New("limit must be a positive integer")
 		}
-		if parsed > 100 {
-			parsed = 100
+		if parsed > 200 {
+			parsed = 200
 		}
 		limit = parsed
 	}
@@ -263,7 +259,7 @@ func parsePhotoFilterParams(c *fiber.Ctx) (repository.PhotoFilter, error) {
 	}, nil
 }
 
-// ToPhotoResponse converts a models.Photo into a PhotoResponse with API URLs, normalized folder path, and date source.
+// ToPhotoResponse converts a models.Photo into a PhotoResponse with API URLs, normalized folder path, and media category.
 func ToPhotoResponse(p models.Photo) PhotoResponse {
 	folder := filepath.ToSlash(filepath.Dir(p.RelativePath))
 	if folder == "." {
@@ -280,15 +276,26 @@ func ToPhotoResponse(p models.Photo) PhotoResponse {
 		dateSource = string(DateSourceNone)
 	}
 
+	mediaCat := "photo"
+	if strings.HasPrefix(p.MediaType, "video/") || media.IsSupportedVideoExtension(p.OriginalFilename) {
+		mediaCat = "video"
+	}
+
 	return PhotoResponse{
 		ID:               p.ID,
 		RelativePath:     p.RelativePath,
 		Folder:           folder,
 		OriginalFilename: p.OriginalFilename,
 		MediaType:        p.MediaType,
+		Type:             mediaCat,
 		FileSize:         p.FileSize,
 		Width:            p.Width,
 		Height:           p.Height,
+		Duration:         p.Duration,
+		VideoCodec:       p.VideoCodec,
+		AudioCodec:       p.AudioCodec,
+		ContainerFormat:  p.ContainerFormat,
+		ThumbnailStatus:  p.ThumbnailStatus,
 		TakenAt:          p.TakenAt,
 		FileModifiedAt:   p.FileModifiedAt,
 		CreatedAt:        p.CreatedAt,
@@ -395,7 +402,7 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 
 		photos, total, hasMore, nextCursorData, err := repo.ListTimelineCursor(c.Context(), filter)
 		if err != nil {
-			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to list timeline photos")
+			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to retrieve timeline photos")
 		}
 
 		responseList := make([]PhotoResponse, len(photos))
@@ -403,52 +410,60 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 			responseList[i] = ToPhotoResponse(p)
 		}
 
-		// Group into day sections or undated section
-		var groups []TimelineGroupResponse
-		groupMap := make(map[string]*TimelineGroupResponse)
+		var nextCursor *string
+		if hasMore && nextCursorData != nil {
+			token, err := EncodeCursor(nextCursorData, scope)
+			if err == nil {
+				nextCursor = &token
+			}
+		}
+
+		// Group photos chronologically by day
+		groups := make([]TimelineGroupResponse, 0)
+		groupMap := make(map[string]int)
 
 		for _, p := range responseList {
-			var groupKey, groupLabel, month string
+			var dateKey string
+			var label string
 			var year, day int
+			var month string
 			var isUndated bool
 
-			if p.TakenAt != nil && !p.IsUndated {
+			if p.TakenAt != nil && !p.TakenAt.IsZero() {
 				t := p.TakenAt.UTC()
-				groupKey = t.Format("2006-01-02")
-				groupLabel = t.Format("Monday, January 2, 2006")
+				dateKey = t.Format("2006-01-02")
+				label = t.Format("Monday, January 2, 2006")
 				year = t.Year()
 				month = t.Format("January")
 				day = t.Day()
 				isUndated = false
 			} else {
-				groupKey = "undated"
-				groupLabel = "Undated Photos"
+				dateKey = "undated"
+				label = "Undated Media"
 				isUndated = true
 			}
 
-			g, exists := groupMap[groupKey]
+			idx, exists := groupMap[dateKey]
 			if !exists {
+				idx = len(groups)
+				groupMap[dateKey] = idx
 				groups = append(groups, TimelineGroupResponse{
-					Date:      groupKey,
-					Label:     groupLabel,
+					Date:      dateKey,
+					Label:     label,
 					Year:      year,
 					Month:     month,
 					Day:       day,
 					IsUndated: isUndated,
 					Photos:    []PhotoResponse{p},
 				})
-				groupMap[groupKey] = &groups[len(groups)-1]
 			} else {
-				g.Photos = append(g.Photos, p)
+				groups[idx].Photos = append(groups[idx].Photos, p)
 			}
 		}
 
-		var nextCursor string
-		if hasMore && nextCursorData != nil {
-			token, err := EncodeCursor(nextCursorData, scope)
-			if err == nil {
-				nextCursor = token
-			}
+		cursorVal := ""
+		if nextCursor != nil {
+			cursorVal = *nextCursor
 		}
 
 		return c.Status(fiber.StatusOK).JSON(TimelineResponse{
@@ -456,17 +471,15 @@ func TimelineHandler(repo repository.PhotoRepository) fiber.Handler {
 			Items:      responseList,
 			Groups:     groups,
 			Total:      total,
-			Limit:      limit,
+			Limit:      filter.Limit,
 			Offset:     filter.Offset,
-			NextCursor: nextCursor,
+			NextCursor: cursorVal,
 			HasMore:    hasMore,
 		})
 	}
 }
 
 // GetPhotoHandler handles GET /api/photos/:id.
-// It supports optional query parameters collectionType and collectionId for prev/next photo navigation,
-// and optional storage parameter to extract extended EXIF metadata.
 func GetPhotoHandler(repo repository.PhotoRepository, store ...*storage.Storage) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil {
@@ -483,24 +496,22 @@ func GetPhotoHandler(repo repository.PhotoRepository, store ...*storage.Storage)
 			if errors.Is(err, repository.ErrNotFound) {
 				return SendError(c, fiber.StatusNotFound, "not_found", "photo not found")
 			}
-			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to get photo")
+			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to retrieve photo")
 		}
 
 		resp := ToPhotoResponse(*photo)
 
-		// Context-aware adjacent photo lookup
-		collectionType := c.Query("collectionType", c.Query("collection", ""))
-		collectionID := c.Query("collectionId", c.Query("collection_id", ""))
-		if collectionType != "" {
-			prevID, nextID, err := repo.GetAdjacentPhotos(c.Context(), id, collectionType, collectionID)
-			if err == nil {
-				resp.PrevID = prevID
-				resp.NextID = nextID
-			}
+		// Context-aware previous and next navigation
+		collectionType := strings.TrimSpace(c.Query("collectionType"))
+		collectionID := strings.TrimSpace(c.Query("collectionId"))
+		prevID, nextID, adjErr := repo.GetAdjacentPhotos(c.Context(), id, collectionType, collectionID)
+		if adjErr == nil {
+			resp.PrevID = prevID
+			resp.NextID = nextID
 		}
 
-		// On-demand EXIF extraction for detailed viewer inspection
-		if len(store) > 0 && store[0] != nil {
+		// On-demand EXIF extraction for detailed photo inspection (images only)
+		if !strings.HasPrefix(photo.MediaType, "video/") && len(store) > 0 && store[0] != nil {
 			resolvedPath, err := store[0].ResolvePath(photo.RelativePath)
 			if err == nil {
 				f, err := os.Open(resolvedPath)
@@ -517,7 +528,7 @@ func GetPhotoHandler(repo repository.PhotoRepository, store ...*storage.Storage)
 	}
 }
 
-// ServeOriginalPhotoHandler handles GET /api/photos/:id/file securely.
+// ServeOriginalPhotoHandler handles GET /api/photos/:id/file securely with HTTP Range support.
 func ServeOriginalPhotoHandler(repo repository.PhotoRepository, store *storage.Storage) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if repo == nil || store == nil {
@@ -545,15 +556,16 @@ func ServeOriginalPhotoHandler(repo repository.PhotoRepository, store *storage.S
 		info, err := os.Stat(resolvedPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return SendError(c, fiber.StatusNotFound, "file_missing", "original image file not found on disk")
+				return SendError(c, fiber.StatusNotFound, "file_missing", "original media file not found on disk")
 			}
-			return SendError(c, fiber.StatusInternalServerError, "filesystem_error", "failed to access image file")
+			return SendError(c, fiber.StatusInternalServerError, "filesystem_error", "failed to access media file")
 		}
 
-		// Security and caching headers
+		// Security, caching, and streaming headers
 		c.Set("Content-Type", photo.MediaType)
 		c.Set("X-Content-Type-Options", "nosniff")
 		c.Set("Cache-Control", "public, max-age=86400")
+		c.Set("Accept-Ranges", "bytes")
 
 		etag := fmt.Sprintf("\"%s-%d-%d\"", photo.ID, info.Size(), info.ModTime().Unix())
 		c.Set("ETag", etag)
@@ -587,14 +599,15 @@ func ServeThumbnailHandler(repo repository.PhotoRepository, store *storage.Stora
 			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to retrieve photo record")
 		}
 
-		// If thumbnail service is available, get or generate thumbnail
+		isVideo := strings.HasPrefix(photo.MediaType, "video/") || media.IsSupportedVideoExtension(photo.OriginalFilename)
+
 		var thumbAbsPath string
 		if thumbSvc != nil {
 			path, err := thumbSvc.GetOrGenerate(c.Context(), photo)
 			if err == nil {
 				thumbAbsPath = path
-			} else if errors.Is(err, storage.ErrReadOnly) {
-				// Read-only storage fallback: serve original photo directly
+			} else if !isVideo && errors.Is(err, storage.ErrReadOnly) {
+				// Read-only storage fallback: serve original photo directly for images only
 				resolvedOrig, resErr := store.ResolvePath(photo.RelativePath)
 				if resErr == nil {
 					if _, statErr := os.Stat(resolvedOrig); statErr == nil {
@@ -607,8 +620,12 @@ func ServeThumbnailHandler(repo repository.PhotoRepository, store *storage.Stora
 			}
 		}
 
-		// If no thumbnail generated, fallback to original
+		// If no thumbnail generated:
+		// For videos, NEVER serve original video file as a thumbnail! Return 404 so frontend can render fallback card.
 		if thumbAbsPath == "" {
+			if isVideo {
+				return SendError(c, fiber.StatusNotFound, "thumbnail_not_found", "thumbnail not available for video")
+			}
 			resolvedOrig, err := store.ResolvePath(photo.RelativePath)
 			if err != nil {
 				return SendError(c, fiber.StatusNotFound, "not_found", "image file not found")
@@ -649,7 +666,7 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 			if errors.Is(err, storage.ErrReadOnly) {
 				return SendError(c, fiber.StatusForbidden, "storage_readonly", "storage is mounted read-only; uploading photos is disabled")
 			}
-			return SendError(c, fiber.StatusInternalServerError, "storage_error", "failed to verify storage write permissions")
+			return SendError(c, fiber.StatusInternalServerError, "storage_error", "storage write access verification failed")
 		}
 
 		form, err := c.MultipartForm()
@@ -657,24 +674,20 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 			return SendError(c, fiber.StatusBadRequest, "invalid_form", "failed to parse multipart form")
 		}
 
-		var fileHeaders []*multipart.FileHeader
-		for _, key := range []string{"photos", "file", "files"} {
-			if headers, ok := form.File[key]; ok {
-				fileHeaders = append(fileHeaders, headers...)
-			}
+		var fileHeaders = form.File["photos"]
+		if len(fileHeaders) == 0 {
+			fileHeaders = form.File["files"]
 		}
 		if len(fileHeaders) == 0 {
-			for _, headers := range form.File {
-				fileHeaders = append(fileHeaders, headers...)
-			}
+			fileHeaders = form.File["file"]
 		}
 
 		if len(fileHeaders) == 0 {
-			return SendError(c, fiber.StatusBadRequest, "no_files", "no files provided in upload request")
+			return SendError(c, fiber.StatusBadRequest, "empty_upload", "no files provided under 'photos', 'files', or 'file'")
 		}
 
 		if len(fileHeaders) > MaxUploadFilesCount {
-			return SendError(c, fiber.StatusBadRequest, "limit_exceeded", fmt.Sprintf("maximum %d files allowed per upload request", MaxUploadFilesCount))
+			return SendError(c, fiber.StatusBadRequest, "too_many_files", fmt.Sprintf("maximum %d files allowed per upload", MaxUploadFilesCount))
 		}
 
 		// Ensure tmp and originals directories exist
@@ -699,7 +712,7 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 			if !media.IsSupportedExtension(origName) {
 				uploadErrors = append(uploadErrors, FileError{
 					Filename: origName,
-					Error:    "unsupported image format",
+					Error:    "unsupported media format",
 				})
 				continue
 			}
@@ -757,31 +770,58 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 				continue
 			}
 
-			// Validate image content and extract metadata safely
-			tmpReader, err := os.Open(tmpFilePath)
-			if err != nil {
-				_ = os.Remove(tmpFilePath)
-				uploadErrors = append(uploadErrors, FileError{
-					Filename: origName,
-					Error:    "failed to read uploaded file for validation",
-				})
-				continue
+			isVideo := media.IsSupportedVideoExtension(origName)
+			var imgMeta media.ImageInfo
+			var vidMeta media.VideoInfo
+
+			if isVideo {
+				var vErr error
+				vidMeta, vErr = media.ExtractVideoMetadata(c.Context(), tmpFilePath)
+				if vErr != nil {
+					_ = os.Remove(tmpFilePath)
+					uploadErrors = append(uploadErrors, FileError{
+						Filename: origName,
+						Error:    fmt.Sprintf("invalid video file: %v", vErr),
+					})
+					continue
+				}
+			} else {
+				tmpReader, err := os.Open(tmpFilePath)
+				if err != nil {
+					_ = os.Remove(tmpFilePath)
+					uploadErrors = append(uploadErrors, FileError{
+						Filename: origName,
+						Error:    "failed to read uploaded file for validation",
+					})
+					continue
+				}
+
+				var extractErr error
+				imgMeta, extractErr = media.ExtractMetadata(tmpReader)
+				tmpReader.Close()
+				if extractErr != nil {
+					_ = os.Remove(tmpFilePath)
+					uploadErrors = append(uploadErrors, FileError{
+						Filename: origName,
+						Error:    fmt.Sprintf("invalid image file: %v", extractErr),
+					})
+					continue
+				}
 			}
 
-			meta, extractErr := media.ExtractMetadata(tmpReader)
-			tmpReader.Close()
-			if extractErr != nil {
-				_ = os.Remove(tmpFilePath)
-				uploadErrors = append(uploadErrors, FileError{
-					Filename: origName,
-					Error:    fmt.Sprintf("invalid image file: %v", extractErr),
-				})
-				continue
-			}
-
-			// Assign stable photo UUID and final destination under originals/
+			// Generate internal filename
 			photoID := uuid.New().String()
-			relPath := filepath.ToSlash(filepath.Join("originals", photoID+meta.Extension))
+			ext := filepath.Ext(origName)
+			if ext == "" {
+				if isVideo {
+					ext = vidMeta.Extension
+				} else {
+					ext = imgMeta.Extension
+				}
+			}
+			storedFilename := fmt.Sprintf("%s%s", photoID, strings.ToLower(ext))
+			relPath := filepath.Join("originals", storedFilename)
+
 			finalPath, err := store.ResolvePath(relPath)
 			if err != nil {
 				_ = os.Remove(tmpFilePath)
@@ -792,13 +832,12 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 				continue
 			}
 
-			// Atomically move from tmp to final path
 			if err := os.Rename(tmpFilePath, finalPath); err != nil {
-				if cpErr := copyFile(tmpFilePath, finalPath); cpErr != nil {
+				if copyErr := copyFile(tmpFilePath, finalPath); copyErr != nil {
 					_ = os.Remove(tmpFilePath)
 					uploadErrors = append(uploadErrors, FileError{
 						Filename: origName,
-						Error:    "failed to store image file",
+						Error:    "failed to store media file",
 					})
 					continue
 				}
@@ -807,20 +846,53 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 
 			now := time.Now().UTC()
 			var wPtr, hPtr *int
-			if meta.Width > 0 && meta.Height > 0 {
-				wPtr = &meta.Width
-				hPtr = &meta.Height
+			var durPtr *float64
+			var vCodecPtr, aCodecPtr, cFormatPtr *string
+			var takenAt *time.Time
+			mimeType := imgMeta.MediaType
+
+			if isVideo {
+				mimeType = vidMeta.MediaType
+				if vidMeta.Width > 0 && vidMeta.Height > 0 {
+					wPtr = &vidMeta.Width
+					hPtr = &vidMeta.Height
+				}
+				if vidMeta.Duration > 0 {
+					durPtr = &vidMeta.Duration
+				}
+				if vidMeta.VideoCodec != "" {
+					vCodecPtr = &vidMeta.VideoCodec
+				}
+				if vidMeta.AudioCodec != "" {
+					aCodecPtr = &vidMeta.AudioCodec
+				}
+				if vidMeta.ContainerFormat != "" {
+					cFormatPtr = &vidMeta.ContainerFormat
+				}
+				takenAt = vidMeta.CreationTime
+			} else {
+				if imgMeta.Width > 0 && imgMeta.Height > 0 {
+					wPtr = &imgMeta.Width
+					hPtr = &imgMeta.Height
+				}
+				takenAt = imgMeta.TakenAt
 			}
 
+			thumbStatus := "ready"
 			photoModel := &models.Photo{
 				ID:               photoID,
 				RelativePath:     relPath,
 				OriginalFilename: origName,
-				MediaType:        meta.MediaType,
+				MediaType:        mimeType,
 				FileSize:         written,
 				Width:            wPtr,
 				Height:           hPtr,
-				TakenAt:          meta.TakenAt,
+				Duration:         durPtr,
+				VideoCodec:       vCodecPtr,
+				AudioCodec:       aCodecPtr,
+				ContainerFormat:  cFormatPtr,
+				ThumbnailStatus:  &thumbStatus,
+				TakenAt:          takenAt,
 				FileModifiedAt:   now,
 				CreatedAt:        now,
 				UpdatedAt:        now,
@@ -830,7 +902,7 @@ func UploadPhotosHandler(repo repository.PhotoRepository, store *storage.Storage
 				_ = os.Remove(finalPath)
 				uploadErrors = append(uploadErrors, FileError{
 					Filename: origName,
-					Error:    "failed to persist photo metadata",
+					Error:    "failed to persist media metadata",
 				})
 				continue
 			}
@@ -895,7 +967,6 @@ func ScanPhotosHandler(s *scanner.Scanner) fiber.Handler {
 			_, _ = s.ScanPath(context.Background(), targetPath, forceRefresh)
 		}()
 
-		// Small delay to allow the scanner goroutine to update status
 		time.Sleep(15 * time.Millisecond)
 
 		return c.Status(fiber.StatusAccepted).JSON(s.Status())

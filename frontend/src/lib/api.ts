@@ -18,6 +18,10 @@ export function toFrontendPhoto(p: PhotoResponse): Photo {
   const date = p.takenAt || p.fileModifiedAt || p.createdAt || ''
   // Clean filename without extension for title
   const title = p.originalFilename.replace(/\.[^/.]+$/, '')
+  const mediaType = p.mediaType || ''
+  const isVideo = p.type === 'video' || mediaType.startsWith('video/')
+  const type: 'photo' | 'video' = isVideo ? 'video' : 'photo'
+
   return {
     id: p.id,
     title: title,
@@ -43,6 +47,13 @@ export function toFrontendPhoto(p: PhotoResponse): Photo {
     },
     prevId: p.prevId,
     nextId: p.nextId,
+    type: type,
+    mediaType: mediaType,
+    duration: p.duration,
+    videoCodec: p.videoCodec,
+    audioCodec: p.audioCodec,
+    containerFormat: p.containerFormat,
+    thumbnailStatus: p.thumbnailStatus,
   }
 }
 

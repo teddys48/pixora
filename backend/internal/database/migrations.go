@@ -81,6 +81,17 @@ CREATE INDEX IF NOT EXISTS idx_photos_file_size ON photos(file_size);
 CREATE INDEX IF NOT EXISTS idx_photo_albums_album_added ON photo_albums(album_id, added_at DESC);
 `,
 	},
+	{
+		Version: 5,
+		Name:    "add_video_metadata_columns",
+		SQL: `
+ALTER TABLE photos ADD COLUMN duration REAL;
+ALTER TABLE photos ADD COLUMN video_codec TEXT;
+ALTER TABLE photos ADD COLUMN audio_codec TEXT;
+ALTER TABLE photos ADD COLUMN container_format TEXT;
+ALTER TABLE photos ADD COLUMN thumbnail_status TEXT DEFAULT 'ready';
+`,
+	},
 }
 
 // Migrate applies all unapplied database migrations in transactional batches.
