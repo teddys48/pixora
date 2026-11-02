@@ -335,6 +335,34 @@ func GetAlbumPhotosHandler(repo repository.AlbumRepository) fiber.Handler {
 	}
 }
 
+// GetAlbumPhotoIDsHandler handles GET /api/albums/:id/photo-ids.
+// Returns an array of all photo IDs associated with the album.
+func GetAlbumPhotoIDsHandler(repo repository.AlbumRepository) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if repo == nil {
+			return SendError(c, fiber.StatusServiceUnavailable, "service_unavailable", "database repository unavailable")
+		}
+
+		id := strings.TrimSpace(c.Params("id"))
+		if id == "" {
+			return SendError(c, fiber.StatusBadRequest, "validation_error", "album ID cannot be empty")
+		}
+
+		photoIDs, err := repo.GetPhotoIDs(c.Context(), id)
+		if err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return SendError(c, fiber.StatusNotFound, "not_found", "album not found")
+			}
+			return SendError(c, fiber.StatusInternalServerError, "database_error", "failed to get album photo IDs")
+		}
+
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"photoIds": photoIDs,
+			"total":    len(photoIDs),
+		})
+	}
+}
+
 // AddPhotosToAlbumHandler handles POST /api/albums/:id/photos.
 // Associates one or more existing photo IDs with an album.
 func AddPhotosToAlbumHandler(repo repository.AlbumRepository) fiber.Handler {

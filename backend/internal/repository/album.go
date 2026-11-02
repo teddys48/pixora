@@ -24,6 +24,7 @@ type AlbumRepository interface {
 	RemovePhoto(ctx context.Context, photoID, albumID string) error
 	GetPhotos(ctx context.Context, albumID string, offset, limit int) ([]models.Photo, int, error)
 	GetPhotosCursor(ctx context.Context, albumID string, limit int, cursor *CursorData) (photos []models.Photo, total int, hasMore bool, nextCursor *CursorData, err error)
+	GetPhotoIDs(ctx context.Context, albumID string) ([]string, error)
 }
 
 // SQLiteAlbumRepository implements AlbumRepository using SQLite.
@@ -449,4 +450,36 @@ LIMIT ?`, whereClause)
 	}
 
 	return photos, total, hasMore, nextCursor, nil
+}
+
+// GetPhotoIDs returns all photo IDs associated with the specified album.
+func (r *SQLiteAlbumRepository) GetPhotoIDs(ctx context.Context, albumID string) ([]string, error) {
+	// Verify album exists
+	var dummy string
+	if err := r.db.QueryRowContext(ctx, "SELECT id FROM albums WHERE id = ?", albumID).Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to verify album: %w", err)
+	}
+
+	query := `SELECT photo_id FROM photo_albums WHERE album_id = ? ORDER BY added_at DESC, photo_id ASC`
+	rows, err := r.db.QueryContext(ctx, query, albumID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query album photo IDs: %w", err)
+	}
+	defer rows.Close()
+
+	photoIDs := make([]string, 0)
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			return nil, fmt.Errorf("failed to scan photo ID: %w", err)
+		}
+		photoIDs = append(photoIDs, pid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error during album photo IDs iteration: %w", err)
+	}
+	return photoIDs, nil
 }

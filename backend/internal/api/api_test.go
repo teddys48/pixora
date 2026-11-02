@@ -86,6 +86,7 @@ func setupTestApp(t *testing.T) (*fiber.App, *database.DB, *storage.Storage, *sc
 	apiGroup.Patch("/albums/:id", api.UpdateAlbumHandler(albumRepo))
 	apiGroup.Delete("/albums/:id", api.DeleteAlbumHandler(albumRepo))
 	apiGroup.Get("/albums/:id/photos", api.GetAlbumPhotosHandler(albumRepo))
+	apiGroup.Get("/albums/:id/photo-ids", api.GetAlbumPhotoIDsHandler(albumRepo))
 	apiGroup.Post("/albums/:id/photos", api.AddPhotosToAlbumHandler(albumRepo))
 	apiGroup.Delete("/albums/:id/photos/:photoId", api.RemovePhotoFromAlbumHandler(albumRepo))
 
@@ -286,6 +287,22 @@ func TestAlbumsAPI(t *testing.T) {
 	}
 	if albumPhotosResp.Photos[0].URL == "" || albumPhotosResp.Photos[0].ThumbnailURL == "" {
 		t.Errorf("Expected valid URL and ThumbnailURL on album photos: %+v", albumPhotosResp.Photos[0])
+	}
+
+	// 11b. GET /api/albums/:id/photo-ids
+	req = httptest.NewRequest("GET", "/api/albums/"+createdAlbum.ID+"/photo-ids", nil)
+	resp, _ = app.Test(req, -1)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("Expected 200 getting album photo IDs, got %d", resp.StatusCode)
+	}
+	var albumPhotoIDsResp struct {
+		PhotoIDs []string `json:"photoIds"`
+		Total    int      `json:"total"`
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &albumPhotoIDsResp)
+	if albumPhotoIDsResp.Total != 2 || len(albumPhotoIDsResp.PhotoIDs) != 2 {
+		t.Errorf("Expected 2 photo IDs, got total=%d len=%d", albumPhotoIDsResp.Total, len(albumPhotoIDsResp.PhotoIDs))
 	}
 
 	// 12. GET /api/albums/:id/photos on nonexistent album returns 404

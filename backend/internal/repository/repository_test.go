@@ -295,6 +295,15 @@ func TestAlbumRepositoryCRUDAndPhotos(t *testing.T) {
 		t.Errorf("Unexpected album photos: %+v, total: %d", albumPhotos, total)
 	}
 
+	// 8b. Get photo IDs in album
+	pIDs, err := albumRepo.GetPhotoIDs(ctx, album.ID)
+	if err != nil {
+		t.Fatalf("Failed to get photo IDs in album: %v", err)
+	}
+	if len(pIDs) != 2 {
+		t.Errorf("Expected 2 photo IDs, got %d", len(pIDs))
+	}
+
 	// 9. Get photos for nonexistent album returns ErrNotFound
 	_, _, err = albumRepo.GetPhotos(ctx, "nonexistent-album", 0, 10)
 	if !errors.Is(err, repository.ErrNotFound) {

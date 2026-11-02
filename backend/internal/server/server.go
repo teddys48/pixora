@@ -96,6 +96,7 @@ func NewWithDependencies(deps Dependencies) *fiber.App {
 		apiGroup.Patch("/albums/:id", api.UpdateAlbumHandler(deps.AlbumRepo))
 		apiGroup.Delete("/albums/:id", api.DeleteAlbumHandler(deps.AlbumRepo))
 		apiGroup.Get("/albums/:id/photos", api.GetAlbumPhotosHandler(deps.AlbumRepo))
+		apiGroup.Get("/albums/:id/photo-ids", api.GetAlbumPhotoIDsHandler(deps.AlbumRepo))
 		apiGroup.Post("/albums/:id/photos", api.AddPhotosToAlbumHandler(deps.AlbumRepo))
 		apiGroup.Delete("/albums/:id/photos/:photoId", api.RemovePhotoFromAlbumHandler(deps.AlbumRepo))
 	}

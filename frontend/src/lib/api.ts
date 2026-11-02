@@ -532,6 +532,28 @@ export async function fetchAlbumPhotos(
   }
 }
 
+export async function fetchAlbumPhotoIds(
+  albumId: string,
+  signal?: AbortSignal
+): Promise<string[]> {
+  const url = `${API_BASE_URL}/albums/${encodeURIComponent(albumId)}/photo-ids`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null)
+    throw new Error(errorBody?.message || `Failed to fetch album photo IDs: HTTP ${response.status}`)
+  }
+
+  const data: { photoIds: string[]; total: number } = await response.json()
+  return data.photoIds || []
+}
+
 export async function addPhotosToAlbum(
   albumId: string,
   photoIds: string[]

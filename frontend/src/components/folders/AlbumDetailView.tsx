@@ -14,6 +14,7 @@ import {
   fetchAlbum,
   removePhotoFromAlbum,
   updateAlbum,
+  fetchAlbumPhotoIds,
 } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import {
@@ -46,6 +47,20 @@ export function AlbumDetailView({
   onDeleteAlbum,
 }: AlbumDetailViewProps) {
   const [photos, setPhotos] = useState<Photo[]>([])
+  const [allAlbumPhotoIds, setAllAlbumPhotoIds] = useState<Set<string>>(new Set())
+
+  const loadAllPhotoIds = useCallback(async () => {
+    try {
+      const ids = await fetchAlbumPhotoIds(album.id)
+      setAllAlbumPhotoIds(new Set(ids))
+    } catch {
+      // Fallback: use loaded photos
+    }
+  }, [album.id])
+
+  useEffect(() => {
+    loadAllPhotoIds()
+  }, [loadAllPhotoIds])
   const [total, setTotal] = useState(album.photoCount)
   const [hasMore, setHasMore] = useState(false)
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -121,6 +136,11 @@ export function AlbumDetailView({
     try {
       await removePhotoFromAlbum(album.id, photo.id)
       setPhotos((prev) => prev.filter((p) => p.id !== photo.id))
+      setAllAlbumPhotoIds((prev) => {
+        const next = new Set(prev)
+        next.delete(photo.id)
+        return next
+      })
       const newTotal = Math.max(0, total - 1)
       setTotal(newTotal)
       onUpdateAlbum({ ...album, photoCount: newTotal })
@@ -135,7 +155,7 @@ export function AlbumDetailView({
 
   const handleAddPhotosSuccess = async (addedCount: number) => {
     setSuccessBanner(`Successfully added ${addedCount} photo${addedCount === 1 ? '' : 's'} to "${album.name}".`)
-    await loadPhotos()
+    await Promise.all([loadPhotos(), loadAllPhotoIds()])
     try {
       const refreshedAlbum = await fetchAlbum(album.id)
       onUpdateAlbum(refreshedAlbum)
@@ -163,8 +183,10 @@ export function AlbumDetailView({
   }, [photos, searchQuery])
 
   const currentPhotoIds = useMemo(() => {
-    return new Set(photos.map((p) => p.id))
-  }, [photos])
+    const set = new Set(allAlbumPhotoIds)
+    photos.forEach((p) => set.add(p.id))
+    return set
+  }, [allAlbumPhotoIds, photos])
 
   return (
     <div className="space-y-6">
