@@ -353,12 +353,17 @@ func GetFolderContentsHandler(store *storage.Storage, repo repository.PhotoRepos
 		var hasMore bool
 		var nextCursorData *repository.CursorData
 
+		folderForFilter := canonicalRel
+		if folderForFilter == "" {
+			folderForFilter = "/"
+		}
+
 		if cursor != nil {
-			photos, totalPhotos, hasMore, nextCursorData, err = repo.ListByFolderCursor(c.Context(), canonicalRel, limit, sortBy, order, cursor)
+			photos, totalPhotos, hasMore, nextCursorData, err = repo.ListByFolderCursor(c.Context(), folderForFilter, limit, sortBy, order, cursor)
 		} else {
 			// Offset or initial page
 			filter := repository.PhotoFilter{
-				Folder:    canonicalRel,
+				Folder:    folderForFilter,
 				Recursive: false,
 				SortBy:    sortBy,
 				SortOrder: order,
@@ -467,11 +472,16 @@ func GetFolderPhotosHandler(store *storage.Storage, repo repository.PhotoReposit
 		var hasMore bool
 		var nextCursorData *repository.CursorData
 
+		folderForFilter := canonicalRel
+		if folderForFilter == "" {
+			folderForFilter = "/"
+		}
+
 		if cursor != nil {
-			photos, total, hasMore, nextCursorData, err = repo.ListByFolderCursor(c.Context(), canonicalRel, limit, sortBy, order, cursor)
+			photos, total, hasMore, nextCursorData, err = repo.ListByFolderCursor(c.Context(), folderForFilter, limit, sortBy, order, cursor)
 		} else {
 			filter := repository.PhotoFilter{
-				Folder:    canonicalRel,
+				Folder:    folderForFilter,
 				Recursive: false,
 				SortBy:    sortBy,
 				SortOrder: order,

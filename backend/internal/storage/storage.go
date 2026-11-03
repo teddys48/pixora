@@ -85,7 +85,7 @@ func (s *Storage) ValidateRelativePath(relPath string) error {
 // Returns the canonical forward-slash separated relative path, or an error if invalid/traversal.
 func ValidateFolderPath(relPath string) (string, error) {
 	trimmed := strings.TrimSpace(relPath)
-	if trimmed == "" || trimmed == "." {
+	if trimmed == "" || trimmed == "." || trimmed == "/" || trimmed == "\\" {
 		return "", nil
 	}
 	if strings.ContainsRune(trimmed, 0) {
@@ -96,7 +96,7 @@ func ValidateFolderPath(relPath string) (string, error) {
 	}
 
 	clean := filepath.Clean(trimmed)
-	if clean == "." {
+	if clean == "." || clean == "/" || clean == "\\" {
 		return "", nil
 	}
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || strings.HasPrefix(clean, "../") {

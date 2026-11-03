@@ -441,6 +441,8 @@ func (s *Scanner) ScanPath(ctx context.Context, targetRelPath string, forceRefre
 			s.status.Status = "failed"
 			s.status.Errors = append(s.status.Errors, walkErr.Error())
 		}
+	} else if failed > 0 && indexed == 0 && updated == 0 && skipped == 0 {
+		s.status.Status = "failed"
 	} else {
 		s.status.Status = "completed"
 	}

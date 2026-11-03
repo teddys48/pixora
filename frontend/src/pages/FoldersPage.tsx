@@ -146,11 +146,25 @@ export function FoldersPage({ onSelectPhoto }: FoldersPageProps) {
     try {
       const status = await triggerScan(true)
       const indexed = status.indexed || 0
-      setScanMessage(
-        indexed > 0
-          ? `Media scan completed: Indexed ${indexed} new photo${indexed === 1 ? '' : 's'}.`
-          : 'Media scan completed: All media files in /media are up to date.'
-      )
+      const failed = status.failed || 0
+      if (status.status === 'failed') {
+        const failedCount = status.failed || (status.errors?.length ?? 1)
+        setPhysicalError(`Media scan failed: ${failedCount} file${failedCount === 1 ? '' : 's'} could not be processed.`)
+      } else if (failed > 0 && indexed === 0) {
+        setScanMessage(
+          `Media scan completed with errors: ${failed} file${failed === 1 ? '' : 's'} failed to index.`
+        )
+      } else if (failed > 0) {
+        setScanMessage(
+          `Media scan completed: Indexed ${indexed} new photo${indexed === 1 ? '' : 's'}, ${failed} failed.`
+        )
+      } else {
+        setScanMessage(
+          indexed > 0
+            ? `Media scan completed: Indexed ${indexed} new photo${indexed === 1 ? '' : 's'}.`
+            : 'Media scan completed: All media files in /media are up to date.'
+        )
+      }
       await loadPhysicalFolders()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to scan library'

@@ -370,6 +370,17 @@ Key Findings:
 3. **Cursor Keyset Pagination:** ~15.0 ms for sequential 2-page keyset traversal (100 items retrieved).
 4. **Search and Date Range Filtering:** ~1.37 ms per indexed search query.
 
+
+### Folder Scan & Photos Scan Consistency Bug Fix
+- **Issue:** Opening physical folders with multi-byte Unicode path names or root directories reported unindexed media files that did not disappear after scanning from either the folder or the Photos page. Photos page scan reported 0 new media because files were already indexed, yet folder queries failed to locate them.
+- **Root Cause:** In `internal/repository/photo.go`, folder matching SQL queries (`buildPhotoFilterConditions`, `CountByFolder`, `ListByFolder`, `GetFolderCoverPhoto`, and `GetAdjacentPhotos`) used Go byte length `len(prefix)` as substring length in SQLite `SUBSTR(relative_path, 1, ?) = ?`. Because SQLite `SUBSTR` operates on character counts rather than UTF-8 bytes, multi-byte Unicode folder names caused SQLite to extract too many characters, failing all equality comparisons. In addition, root directory matching did not handle `canonicalRel == ""` properly in `buildPhotoFilterConditions`.
+- **Fix:** 
+  1. Replaced byte-length parameters with SQLite character count function `LENGTH(?)` across all folder query clauses.
+  2. Normalized root folder paths (`""`, `"/"`, `"."`, `"\"`) cleanly in `ValidateFolderPath`, `folders.go`, and repository cursor pagination.
+  3. Corrected scan status reporting so total indexing failures mark status as `failed` rather than false `completed`.
+  4. Updated frontend folder scan and library scan status banners to report indexing failures cleanly.
+  5. Added comprehensive 10-step isolated integration test suite in `internal/api/scan_consistency_test.go` verifying 134 media files in nested and Unicode folders.
+
 ### Frontend Build & Lint Checks (`frontend`)
 ```
 > tsc --noEmit (Passed cleanly, 0 errors)

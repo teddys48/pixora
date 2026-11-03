@@ -110,11 +110,25 @@ export function PhysicalFolderDetailView({
       const status = await triggerScan(true, path)
       if (status.status === 'completed') {
         const indexed = status.indexed || 0
-        setScanMessage(
-          indexed > 0
-            ? `Media scan completed: Indexed ${indexed} new photo${indexed === 1 ? '' : 's'}.`
-            : 'Media scan completed: All media files in this folder are up to date.'
-        )
+        const failed = status.failed || 0
+        if (failed > 0 && indexed === 0) {
+          setScanMessage(
+            `Media scan completed with errors: ${failed} file${failed === 1 ? '' : 's'} failed to index.`
+          )
+        } else if (failed > 0) {
+          setScanMessage(
+            `Media scan completed: Indexed ${indexed} new photo${indexed === 1 ? '' : 's'}, ${failed} failed.`
+          )
+        } else if (indexed > 0) {
+          setScanMessage(
+            `Media scan completed: Indexed ${indexed} new photo${indexed === 1 ? '' : 's'}.`
+          )
+        } else {
+          setScanMessage('Media scan completed: All media files in this folder are up to date.')
+        }
+      } else if (status.status === 'failed') {
+        const failedCount = status.failed || (status.errors?.length ?? 1)
+        setError(`Media scan failed: ${failedCount} file${failedCount === 1 ? '' : 's'} could not be processed.`)
       } else {
         setScanMessage('Media scan completed.')
       }

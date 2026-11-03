@@ -139,14 +139,13 @@ func buildPhotoFilterConditions(filter PhotoFilter) (string, []interface{}) {
 	// 4. Physical Folder Filtering
 	normFolder := cleanFolderPath(filter.Folder)
 	if normFolder != "" {
+		prefix := normFolder + "/"
 		if filter.Recursive {
-			prefix := normFolder + "/"
-			whereClauses = append(whereClauses, "(relative_path = ? OR SUBSTR(relative_path, 1, ?) = ?)")
-			args = append(args, normFolder, len(prefix), prefix)
+			whereClauses = append(whereClauses, "(relative_path = ? OR SUBSTR(relative_path, 1, LENGTH(?)) = ?)")
+			args = append(args, normFolder, prefix, prefix)
 		} else {
-			prefix := normFolder + "/"
-			whereClauses = append(whereClauses, "SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0")
-			args = append(args, len(prefix), prefix, len(prefix)+1)
+			whereClauses = append(whereClauses, "SUBSTR(relative_path, 1, LENGTH(?)) = ? AND INSTR(SUBSTR(relative_path, LENGTH(?) + 1), '/') = 0")
+			args = append(args, prefix, prefix, prefix)
 		}
 	} else if strings.TrimSpace(filter.Folder) == "/" || strings.TrimSpace(filter.Folder) == "." {
 		if !filter.Recursive {
@@ -605,8 +604,8 @@ func (r *SQLitePhotoRepository) ListByFolder(ctx context.Context, folderPath str
 		whereClause = "INSTR(relative_path, '/') = 0"
 	} else {
 		prefix := normPath + "/"
-		whereClause = "SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0"
-		countArgs = append(countArgs, len(prefix), prefix, len(prefix)+1)
+		whereClause = "SUBSTR(relative_path, 1, LENGTH(?)) = ? AND INSTR(SUBSTR(relative_path, LENGTH(?) + 1), '/') = 0"
+		countArgs = append(countArgs, prefix, prefix, prefix)
 	}
 
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM photos WHERE %s", whereClause)
@@ -651,8 +650,12 @@ LIMIT ? OFFSET ?`, photoSelectColumns, whereClause, orderByClause)
 
 // ListByFolderCursor returns photos whose direct parent folder is folderPath, with cursor-based pagination.
 func (r *SQLitePhotoRepository) ListByFolderCursor(ctx context.Context, folderPath string, limit int, sortBy, order string, cursor *CursorData) ([]models.Photo, int, bool, *CursorData, error) {
+	fp := folderPath
+	if cleanFolderPath(fp) == "" {
+		fp = "/"
+	}
 	return r.SearchAndFilterCursor(ctx, PhotoFilter{
-		Folder:    folderPath,
+		Folder:    fp,
 		Recursive: false,
 		SortBy:    sortBy,
 		SortOrder: order,
@@ -677,11 +680,11 @@ func (r *SQLitePhotoRepository) CountByFolder(ctx context.Context, folderPath st
 	} else {
 		prefix := normPath + "/"
 		if recursive {
-			query = "SELECT COUNT(*) FROM photos WHERE relative_path = ? OR SUBSTR(relative_path, 1, ?) = ?"
-			args = append(args, normPath, len(prefix), prefix)
+			query = "SELECT COUNT(*) FROM photos WHERE relative_path = ? OR SUBSTR(relative_path, 1, LENGTH(?)) = ?"
+			args = append(args, normPath, prefix, prefix)
 		} else {
-			query = "SELECT COUNT(*) FROM photos WHERE SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0"
-			args = append(args, len(prefix), prefix, len(prefix)+1)
+			query = "SELECT COUNT(*) FROM photos WHERE SUBSTR(relative_path, 1, LENGTH(?)) = ? AND INSTR(SUBSTR(relative_path, LENGTH(?) + 1), '/') = 0"
+			args = append(args, prefix, prefix, prefix)
 		}
 	}
 
@@ -710,10 +713,10 @@ LIMIT 1`, photoSelectColumns)
 		query = fmt.Sprintf(`
 SELECT %s
 FROM photos
-WHERE SUBSTR(relative_path, 1, ?) = ?
+WHERE SUBSTR(relative_path, 1, LENGTH(?)) = ?
 ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC
 LIMIT 1`, photoSelectColumns)
-		args = append(args, len(prefix), prefix)
+		args = append(args, prefix, prefix)
 	}
 
 	p, err := scanPhoto(r.db.QueryRowContext(ctx, query, args...))
@@ -788,10 +791,10 @@ WITH ordered AS (
            LAG(id) OVER (ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC) AS prev_id,
            LEAD(id) OVER (ORDER BY (CASE WHEN taken_at IS NOT NULL THEN 0 ELSE 1 END) ASC, taken_at DESC, file_modified_at DESC, id ASC) AS next_id
     FROM photos
-    WHERE SUBSTR(relative_path, 1, ?) = ? AND INSTR(SUBSTR(relative_path, ?), '/') = 0
+    WHERE SUBSTR(relative_path, 1, LENGTH(?)) = ? AND INSTR(SUBSTR(relative_path, LENGTH(?) + 1), '/') = 0
 )
 SELECT prev_id, next_id FROM ordered WHERE id = ?`
-			args = []interface{}{len(prefix), prefix, len(prefix) + 1, id}
+			args = []interface{}{prefix, prefix, prefix, id}
 		}
 
 	case "timeline":
